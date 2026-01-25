@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MajesticEscape Chat - Test Page</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #f5f5f5;
+      }
+      .container {
+        max-width: 800px;
+        margin: 20px auto;
+        padding: 20px;
+      }
+      h1 {
+        color: #4d7c3f;
+        margin-bottom: 20px;
+      }
+      .card {
+        background: white;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+      }
+      .form-group {
+        margin-bottom: 15px;
+      }
+      label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: 500;
+        color: #333;
+      }
+      input,
+      textarea {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        font-size: 14px;
+      }
+      input:focus,
+      textarea:focus {
+        outline: none;
+        border-color: #4d7c3f;
+      }
+      button {
+        background: #4d7c3f;
+        color: white;
+        border: none;
+        padding: 12px 24px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      button:hover {
+        background: #3d6a2f;
+      }
+      button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+      }
+      .status {
+        padding: 10px;
+        border-radius: 8px;
+        margin-bottom: 15px;
+      }
+      .status.connected {
+        background: #d4edda;
+        color: #155724;
+      }
+      .status.disconnected {
+        background: #f8d7da;
+        color: #721c24;
+      }
+      .status.connecting {
+        background: #fff3cd;
+        color: #856404;
+      }
+      .messages {
+        height: 300px;
+        overflow-y: auto;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 15px;
+        background: #fafafa;
+      }
+      .message {
+        margin-bottom: 10px;
+        padding: 10px;
+        border-radius: 8px;
+        max-width: 80%;
+      }
+      .message.sent {
+        background: #4d7c3f;
+        color: white;
+        margin-left: auto;
+      }
+      .message.received {
+        background: white;
+        border: 1px solid #ddd;
+      }
+      .message .meta {
+        font-size: 11px;
+        opacity: 0.7;
+        margin-top: 5px;
+      }
+      .log {
+        font-family: monospace;
+        font-size: 12px;
+        background: #1e1e1e;
+        color: #d4d4d4;
+        padding: 15px;
+        border-radius: 8px;
+        height: 200px;
+        overflow-y: auto;
+      }
+      .log .info {
+        color: #4ec9b0;
+      }
+      .log .error {
+        color: #f14c4c;
+      }
+      .log .warn {
+        color: #cca700;
+      }
+      .flex {
+        display: flex;
+        gap: 10px;
+      }
+      .flex-1 {
+        flex: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🏠 MajesticEscape Chat Test</h1>
+
+      <!-- Connection Status -->
+      <div id="status" class="status disconnected">Disconnected</div>
+
+      <!-- Auth Section -->
+      <div class="card">
+        <h3>1. Authentication</h3>
+        <div class="form-group">
+          <label>JWT Token (from server.me)</label>
+          <textarea
+            id="token"
+            rows="3"
+            placeholder="Paste your JWT token here..."
+          ></textarea>
+        </div>
+        <button onclick="connect()">Connect to Chat Server</button>
+        <button
+          onclick="disconnect()"
+          style="background: #dc3545; margin-left: 10px"
+        >
+          Disconnect
+        </button>
+      </div>
+
+      <!-- Conversation Section -->
+      <div class="card">
+        <h3>2. Create/Join Conversation</h3>
+        <div class="flex">
+          <div class="flex-1">
+            <div class="form-group">
+              <label>Property ID</label>
+              <input
+                type="text"
+                id="propertyId"
+                placeholder="MongoDB ObjectId"
+              />
+            </div>
+          </div>
+          <div class="flex-1">
+            <div class="form-group">
+              <label>Host ID</label>
+              <input type="text" id="hostId" placeholder="Host's user ID" />
+            </div>
+          </div>
+          <div class="flex-1">
+            <div class="form-group">
+              <label>Guest ID</label>
+              <input type="text" id="guestId" placeholder="Guest's user ID" />
+            </div>
+          </div>
+        </div>
+        <button onclick="createConversation()">Create/Get Conversation</button>
+        <div class="form-group" style="margin-top: 15px">
+          <label>Conversation ID</label>
+          <input
+            type="text"
+            id="conversationId"
+            placeholder="Will be filled after creation"
+          />
+        </div>
+        <button onclick="joinConversation()">Join Conversation</button>
+      </div>
+
+      <!-- Chat Section -->
+      <div class="card">
+        <h3>3. Chat</h3>
+        <div id="messages" class="messages">
+          <p style="color: #999; text-align: center">
+            Messages will appear here...
+          </p>
+        </div>
+        <div class="flex" style="margin-top: 15px">
+          <input
+            type="text"
+            id="messageInput"
+            class="flex-1"
+            placeholder="Type a message..."
+            onkeypress="if (event.key === 'Enter') sendMessage();"
+          />
+          <button onclick="sendMessage()">Send</button>
+        </div>
+      </div>
+
+      <!-- Debug Log -->
+      <div class="card">
+        <h3>Debug Log</h3>
+        <div id="log" class="log"></div>
+      </div>
+    </div>
+
+    <script>
+      const CHAT_URL = "http://localhost:3001";
+      let socket = null;
+      let currentUserId = null;
+      let currentConversationId = null;
+
+      function log(message, type = "info") {
+        const logEl = document.getElementById("log");
+        const time = new Date().toLocaleTimeString();
+        logEl.innerHTML += `<div class="${type}">[${time}] ${message}</div>`;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function updateStatus(status, text) {
+        const statusEl = document.getElementById("status");
+        statusEl.className = `status ${status}`;
+        statusEl.textContent = text;
+      }
+
+      function connect() {
+        const token = document.getElementById("token").value.trim();
+        if (!token) {
+          log("Please enter a JWT token", "error");
+          return;
+        }
+
+        // Decode token to get userId
+        try {
+          const payload = JSON.parse(atob(token.split(".")[1]));
+          currentUserId = payload.userId;
+          log(`Decoded userId: ${currentUserId}`, "info");
+        } catch (e) {
+          log("Invalid token format", "error");
+          return;
+        }
+
+        updateStatus("connecting", "Connecting...");
+        log("Connecting to chat server...");
+
+        socket = io(CHAT_URL, {
+          auth: { token },
+          reconnection: true,
+          reconnectionDelay: 1000,
+        });
+
+        socket.on("connect", () => {
+          updateStatus("connected", "Connected ✓");
+          log("Connected to chat server!", "info");
+        });
+
+        socket.on("disconnect", (reason) => {
+          updateStatus("disconnected", "Disconnected");
+          log(`Disconnected: ${reason}`, "warn");
+        });
+
+        socket.on("connect_error", (error) => {
+          updateStatus("disconnected", "Connection Error");
+          log(`Connection error: ${error.message}`, "error");
+        });
+
+        socket.on("error", (error) => {
+          log(`Server error: ${JSON.stringify(error)}`, "error");
+        });
+
+        socket.on("message:new", (data) => {
+          log(`New message received: ${JSON.stringify(data)}`, "info");
+          addMessage(data.message, data.message.senderId !== currentUserId);
+        });
+
+        socket.on("message:sent", (data) => {
+          log(`Message sent confirmation: ${data.messageId}`, "info");
+        });
+
+        socket.on("typing:update", (data) => {
+          log(`Typing update: ${JSON.stringify(data)}`, "info");
+        });
+      }
+
+      function disconnect() {
+        if (socket) {
+          socket.disconnect();
+          socket = null;
+          currentConversationId = null;
+          updateStatus("disconnected", "Disconnected");
+          log("Disconnected from chat server");
+        }
+      }
+
+      async function createConversation() {
+        const token = document.getElementById("token").value.trim();
+        const propertyId = document.getElementById("propertyId").value.trim();
+        const hostId = document.getElementById("hostId").value.trim();
+        const guestId = document.getElementById("guestId").value.trim();
+
+        if (!token || !propertyId || !hostId || !guestId) {
+          log("Please fill all fields", "error");
+          return;
+        }
+
+        try {
+          log("Creating conversation...");
+          const response = await fetch(`${CHAT_URL}/api/chat/conversations`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ propertyId, hostId, guestId }),
+          });
+
+          const data = await response.json();
+          log(
+            `Response: ${JSON.stringify(data)}`,
+            response.ok ? "info" : "error",
+          );
+
+          if (data.success && data.data) {
+            const convId = data.data._id || data.data.id;
+            document.getElementById("conversationId").value = convId;
+            log(`Conversation created/found: ${convId}`, "info");
+          }
+        } catch (error) {
+          log(`Error: ${error.message}`, "error");
+        }
+      }
+
+      function joinConversation() {
+        const conversationId = document
+          .getElementById("conversationId")
+          .value.trim();
+        if (!conversationId) {
+          log("Please enter a conversation ID", "error");
+          return;
+        }
+
+        if (!socket || !socket.connected) {
+          log("Please connect first", "error");
+          return;
+        }
+
+        currentConversationId = conversationId;
+        socket.emit("conversation:join", { conversationId });
+        log(`Joined conversation: ${conversationId}`, "info");
+
+        // Clear messages
+        document.getElementById("messages").innerHTML = "";
+
+        // Load existing messages
+        loadMessages(conversationId);
+      }
+
+      async function loadMessages(conversationId) {
+        const token = document.getElementById("token").value.trim();
+        try {
+          const response = await fetch(
+            `${CHAT_URL}/api/chat/conversations/${conversationId}/messages?limit=50`,
+            {
+              headers: { Authorization: `Bearer ${token}` },
+            },
+          );
+          const data = await response.json();
+
+          if (data.success && data.data && data.data.data) {
+            log(`Loaded ${data.data.data.length} messages`, "info");
+            data.data.data.forEach((msg) => {
+              addMessage(msg, msg.senderId !== currentUserId);
+            });
+          }
+        } catch (error) {
+          log(`Error loading messages: ${error.message}`, "error");
+        }
+      }
+
+      function sendMessage() {
+        const input = document.getElementById("messageInput");
+        const text = input.value.trim();
+
+        if (!text) return;
+        if (!socket || !socket.connected) {
+          log("Please connect first", "error");
+          return;
+        }
+        if (!currentConversationId) {
+          log("Please join a conversation first", "error");
+          return;
+        }
+
+        const clientMessageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+        socket.emit(
+          "message:send",
+          {
+            conversationId: currentConversationId,
+            content: { text },
+            type: "text",
+            clientMessageId,
+          },
+          (response) => {
+            if (response.success) {
+              log(`Message sent: ${response.messageId}`, "info");
+              addMessage(
+                {
+                  content: { text },
+                  senderId: currentUserId,
+                  createdAt: new Date(),
+                },
+                false,
+              );
+            } else {
+              log(`Failed to send: ${response.error}`, "error");
+            }
+          },
+        );
+
+        input.value = "";
+      }
+
+      function addMessage(message, isReceived) {
+        const messagesEl = document.getElementById("messages");
+        if (messagesEl.querySelector("p")) {
+          messagesEl.innerHTML = "";
+        }
+
+        const div = document.createElement("div");
+        div.className = `message ${isReceived ? "received" : "sent"}`;
+        div.innerHTML = `
+        <div>${message.content?.text || "[No text]"}</div>
+        <div class="meta">${new Date(message.createdAt).toLocaleTimeString()}</div>
+      `;
+        messagesEl.appendChild(div);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      // Initialize
+      log("Chat test page loaded. Enter your JWT token and connect.", "info");
+    </script>
+  </body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "name": "@majestic/chat-server",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node-dev --respawn -r dotenv/config src/index.ts dotenv_config_path=../../.env",
+    "start": "node -r dotenv/config dist/index.js dotenv_config_path=../../.env",
+    "lint": "eslint src/",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@majestic/chat-shared": "*",
+    "socket.io": "^4.7.0",
+    "@socket.io/redis-adapter": "^8.2.0",
+    "ioredis": "^5.3.0",
+    "mongoose": "^8.0.0",
+    "pino": "^8.16.0",
+    "pino-pretty": "^10.2.0",
+    "jsonwebtoken": "^9.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.0",
+    "dotenv": "^16.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0",
+    "@types/jsonwebtoken": "^9.0.0",
+    "@types/cors": "^2.8.0",
+    "@types/express": "^4.17.0",
+    "ts-node-dev": "^2.0.0"
+  }
+}
