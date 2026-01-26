@@ -162,13 +162,20 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
 
       try {
         const { conversationId } = data;
+        const roomName = getRoomName(conversationId);
+
+        // Skip if already in this room (deduplication)
+        if (socket.data.joinedRooms.has(roomName)) {
+          logger.debug({ userId: user.id, conversationId }, 'Already in conversation room, skipping');
+          return;
+        }
+
         logger.debug({ userId: user.id, conversationId }, 'Joining conversation');
 
         // Verify user is participant
         const conversation = await chatService.getConversation(conversationId, user.id);
 
         // Join room
-        const roomName = getRoomName(conversationId);
         await socket.join(roomName);
         socket.data.joinedRooms.add(roomName);
 
