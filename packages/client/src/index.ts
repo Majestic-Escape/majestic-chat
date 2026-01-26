@@ -7,6 +7,7 @@ export { ChatProvider, useChatContext, useChatClient, ChatContextValue, ChatProv
 // Hooks
 export { useChat, UseChatOptions, UseChatReturn } from './hooks/useChat';
 export { useConversations, UseConversationsReturn } from './hooks/useConversations';
+export { usePageVisibility } from './hooks/usePageVisibility';
 
 // Components
 export { ChatWindow, ChatWindowProps } from './components/ChatWindow';
