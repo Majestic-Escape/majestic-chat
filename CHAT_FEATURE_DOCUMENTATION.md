@@ -314,6 +314,19 @@ The content moderation is implemented in `majestic-chat/packages/shared/src/mode
 | `src/components/user-dropdown-menu.jsx`                   | MODIFIED | Added "Messages" link in dropdown                      |
 | `src/components/protected-route.tsx`                      | NEW      | Auth wrapper for protected chat pages                  |
 
+**Socket Management:**
+
+| File Path           | Status | Purpose                                                   |
+| ------------------- | ------ | --------------------------------------------------------- |
+| `src/lib/socket.js` | NEW    | Singleton socket manager - prevents duplicate connections |
+
+**Mobile Components:**
+
+| File Path                                  | Status | Purpose                                              |
+| ------------------------------------------ | ------ | ---------------------------------------------------- |
+| `src/components/mobile-chat-container.jsx` | NEW    | Mobile-optimized chat wrapper with keyboard handling |
+| `src/components/mobile-chat-input.jsx`     | NEW    | Mobile-optimized message input component             |
+
 **Configuration:**
 
 | File Path    | Status   | Purpose                               |
@@ -901,6 +914,52 @@ When reviewing chat-related PRs, these files should be reviewed as a group:
 | SSL/WSS errors                  | Certificate issues           | Ensure SSL is properly configured for chat subdomain      |
 | Host inbox empty                | User not a host              | User must have host role in conversations                 |
 | Guest details not loading       | API endpoint wrong           | Check `/guests/info/:userId` endpoint in server.me        |
+| Duplicate socket connections    | Multiple tabs/pages          | Normal - each tab has its own socket (by design)          |
+| Duplicate room joins in logs    | React StrictMode             | Server-side deduplication handles this automatically      |
+
+### Socket Connection Architecture
+
+The chat system uses a **singleton socket manager** (`src/lib/socket.js` in user.website) to prevent duplicate connections within the same browser tab:
+
+**How it works:**
+
+- Single socket instance per token (user session)
+- Client-side room join deduplication via `joinedRooms` Set
+- Server-side deduplication in `messageEvents.ts` (skips if already in room)
+- Reference counting for proper cleanup when components unmount
+
+**Key files:**
+
+- `user.website/src/lib/socket.js` - Singleton socket manager
+- `majestic-chat/packages/server/src/events/messageEvents.ts` - Server-side deduplication
+
+**Usage in components:**
+
+```javascript
+import { socketManager } from "@/lib/socket";
+
+// Get or create socket (reuses existing if same token)
+const socket = socketManager.getSocket(token);
+
+// Join a room (automatically deduplicates)
+socketManager.joinRoom(conversationId);
+
+// Leave a room
+socketManager.leaveRoom(conversationId);
+
+// Release socket reference (disconnects when all refs released)
+socketManager.releaseSocket();
+```
+
+**Server logs to expect (healthy):**
+
+```
+INFO: Socket authenticated socketId: "abc123" userId: "user1"
+INFO: Client connected socketId: "abc123"
+DEBUG: Joining conversation userId: "user1" conversationId: "conv1"
+INFO: Joined conversation room userId: "user1" conversationId: "conv1"
+DEBUG: Already in conversation room, skipping  // Deduplication working
+```
 
 ### Debug Mode
 
