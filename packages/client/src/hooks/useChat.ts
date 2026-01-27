@@ -122,14 +122,20 @@ export function useChat({ conversationId, apiUrl, onNewMessage, onMessageRead }:
     }) => {
       if (data.conversationId === conversationId) {
         setMessages((prev) =>
-          prev.map((msg) =>
-            data.messageIds.includes(msg.id)
-              ? {
-                  ...msg,
-                  readBy: [...msg.readBy, { userId: data.userId, readAt: data.timestamp }],
-                }
-              : msg
-          )
+          prev.map((msg) => {
+            if (!data.messageIds.includes(msg.id)) {
+              return msg;
+            }
+            // Only add read receipt if user hasn't already read this message
+            const alreadyRead = msg.readBy.some((r) => r.userId === data.userId);
+            if (alreadyRead) {
+              return msg;
+            }
+            return {
+              ...msg,
+              readBy: [...msg.readBy, { userId: data.userId, readAt: data.timestamp }],
+            };
+          })
         );
         onMessageRead?.(data);
       }

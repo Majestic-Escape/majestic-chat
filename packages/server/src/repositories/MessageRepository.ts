@@ -109,20 +109,26 @@ export class MessageRepository {
     }
   }
 
-  async updateReadBy(messageIds: string[], userId: string, readAt: Date): Promise<void> {
+  async updateReadBy(conversationId: string, messageIds: string[], userId: string, readAt: Date): Promise<void> {
     try {
-      await this.model.updateMany(
-        { _id: { $in: messageIds } },
+      // Only update messages that belong to the specified conversation
+      // and where the user hasn't already read the message
+      const result = await this.model.updateMany(
+        { 
+          _id: { $in: messageIds },
+          conversationId: conversationId,
+          'readBy.userId': { $ne: userId }  // Only update if user hasn't already read
+        },
         {
-          $addToSet: {
+          $push: {
             readBy: { userId, readAt },
           },
         }
       );
 
-      this.logger.debug({ messageIds, userId }, 'Messages marked as read');
+      this.logger.debug({ messageIds, userId, conversationId, matchedCount: result.matchedCount }, 'Messages marked as read');
     } catch (error) {
-      this.logger.error({ error, messageIds, userId }, 'Error updating read receipts');
+      this.logger.error({ error, messageIds, userId, conversationId }, 'Error updating read receipts');
       throw ChatError.database('Failed to update read receipts');
     }
   }
