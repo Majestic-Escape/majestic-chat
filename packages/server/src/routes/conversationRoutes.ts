@@ -22,6 +22,11 @@ interface PropertyValidationResult {
 
 // Property API response structure
 interface PropertyApiResponse {
+  success?: boolean;
+  data?: {
+    host?: { _id?: string; id?: string } | string;
+    hostId?: string;
+  };
   property?: {
     host?: { _id?: string; id?: string } | string;
     hostId?: string;
@@ -36,7 +41,7 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
   try {
     const apiBaseUrl = process.env.MAIN_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5005/api/v1';
     
-    const response = await fetch(`${apiBaseUrl}/property/${propertyId}`);
+    const response = await fetch(`${apiBaseUrl}/properties/${propertyId}`);
     
     if (!response.ok) {
       if (response.status === 404) {
@@ -48,7 +53,8 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
     }
 
     const data = await response.json() as PropertyApiResponse;
-    const property = data.property || data;
+    // API returns { success: true, data: property } structure
+    const property = data.data || data.property || data;
 
     // Check if the hostId matches the property's host
     // Handle different possible host field structures
