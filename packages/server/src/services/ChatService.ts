@@ -153,8 +153,8 @@ export class ChatService {
         throw ChatError.userNotParticipant();
       }
 
-      // Update readBy on messages
-      await this.messageRepo.updateReadBy(messageIds, userId, new Date());
+      // Update readBy on messages (only for messages in this conversation)
+      await this.messageRepo.updateReadBy(conversationId, messageIds, userId, new Date());
 
       // Reset unread count
       await this.conversationRepo.resetUnreadCount(conversationId, userId);
