@@ -11,6 +11,7 @@
     "build:server": "npm run build -w @majestic/chat-server",
     "build:client": "npm run build -w @majestic/chat-client",
     "dev:server": "npm run dev -w @majestic/chat-server",
+    "start": "node packages/server/dist/index.js",
     "lint": "npm run lint --workspaces",
     "test": "npm run test --workspaces",
     "clean": "rm -rf packages/*/dist"
