@@ -8,7 +8,6 @@ import { logger as baseLogger } from '../lib/logger';
  * Without this, if Host A types on Device 1, Device 2 (also logged in as Host A) would
  * incorrectly show "Typing..." as if the other person is typing.
  */
- */
 async function emitTypingToOtherUsers(
   io: TypedServer,
   roomName: string,
