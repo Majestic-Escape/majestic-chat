@@ -160,7 +160,8 @@ router.get('/conversations/check', verifyToken, async (req: AuthRequest, res: Re
       success: true, 
       data: { 
         exists: !!conversation,
-        conversationId: conversation?.id || null
+        conversationId: conversation?.id || null,
+        hasMessages: !!conversation?.lastMessage
       } 
     });
   } catch (error) {
