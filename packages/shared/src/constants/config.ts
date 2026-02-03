@@ -5,8 +5,12 @@ export const CHAT_CONFIG = {
 
   // Timeouts (ms)
   TYPING_TIMEOUT: 3000,
-  SOCKET_PING_TIMEOUT: 20000,
+  // Increased ping timeout to prevent "transport close" disconnects
+  // Server waits 60s for pong before considering connection dead
+  SOCKET_PING_TIMEOUT: 60000,
+  // Ping interval - server sends ping every 25s
   SOCKET_PING_INTERVAL: 25000,
+  // Connection recovery - allow 2 minutes for reconnection
   CONNECTION_RECOVERY_DURATION: 120000,
 
   // Rate limits

@@ -19,9 +19,17 @@ export class ConversationRepository {
       const conversation = await this.model.create(data);
       this.logger.info({ conversationId: conversation._id }, 'Conversation created');
 
-      return this.transformDocument(conversation.toObject());
-    } catch (error) {
-      this.logger.error({ error }, 'Error creating conversation');
+      // Use toJSON which applies the transform and returns proper format
+      const result = conversation.toJSON() as unknown as Conversation;
+      this.logger.debug({ resultId: result.id }, 'Document transformed');
+      
+      return result;
+    } catch (error: any) {
+      this.logger.error({ 
+        error: error?.message || error, 
+        stack: error?.stack,
+        name: error?.name 
+      }, 'Error creating conversation');
       throw ChatError.database('Failed to create conversation');
     }
   }
@@ -167,8 +175,16 @@ export class ConversationRepository {
   }
 
   private transformDocument(doc: any): Conversation {
+    // Handle both transformed (id) and raw (_id) documents
+    const id = doc.id || (doc._id ? doc._id.toString() : undefined);
+    
+    if (!id) {
+      this.logger.error({ doc }, 'Document has no id or _id');
+      throw new Error('Document has no id');
+    }
+    
     return {
-      id: doc._id.toString(),
+      id,
       propertyId: doc.propertyId,
       bookingId: doc.bookingId,
       participants: doc.participants,

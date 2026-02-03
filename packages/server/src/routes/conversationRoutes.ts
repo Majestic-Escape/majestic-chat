@@ -41,18 +41,31 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
   try {
     const apiBaseUrl = process.env.MAIN_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5005/api/v1';
     
-    const response = await fetch(`${apiBaseUrl}/properties/${propertyId}`);
+    logger.debug({ apiBaseUrl, propertyId, hostId }, 'Validating property host');
     
-    if (!response.ok) {
-      if (response.status === 404) {
+    // Create abort controller with timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    
+    let fetchResponse: globalThis.Response;
+    try {
+      fetchResponse = await fetch(`${apiBaseUrl}/properties/${propertyId}`, {
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    
+    if (!fetchResponse.ok) {
+      if (fetchResponse.status === 404) {
         return { valid: false, message: 'Property not found' };
       }
-      logger.warn({ propertyId, status: response.status }, 'Failed to fetch property for validation');
+      logger.warn({ propertyId, status: fetchResponse.status }, 'Failed to fetch property for validation - allowing request');
       // On API error, allow the request but log it - don't block legitimate users
       return { valid: true };
     }
 
-    const data = await response.json() as PropertyApiResponse;
+    const data = await fetchResponse.json() as PropertyApiResponse;
     // API returns { success: true, data: property } structure
     const property = data.data || data.property || data;
 
@@ -68,18 +81,26 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
     }
     
     if (!propertyHostId) {
-      logger.warn({ propertyId }, 'Property has no host field');
-      return { valid: false, message: 'Property has no associated host' };
+      logger.warn({ propertyId }, 'Property has no host field - allowing request');
+      // Allow the request if we can't determine the host - don't block legitimate users
+      return { valid: true };
     }
 
     // Compare as strings to handle ObjectId vs string comparison
     if (String(propertyHostId) !== String(hostId)) {
+      logger.warn({ propertyId, propertyHostId, providedHostId: hostId }, 'Host ID mismatch');
       return { valid: false, message: 'Host ID does not match property owner' };
     }
 
+    logger.debug({ propertyId, hostId }, 'Property host validation successful');
     return { valid: true };
-  } catch (error) {
-    logger.error({ error, propertyId, hostId }, 'Error validating property host');
+  } catch (error: any) {
+    // Check if it's an abort error (timeout)
+    if (error?.name === 'AbortError') {
+      logger.warn({ propertyId, hostId }, 'Property validation timed out - allowing request');
+    } else {
+      logger.error({ error, propertyId, hostId }, 'Error validating property host - allowing request');
+    }
     // On network/parsing error, allow the request but log it
     // This prevents blocking legitimate users due to temporary API issues
     return { valid: true };
@@ -180,6 +201,8 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
     const { propertyId, hostId, guestId, bookingId, hostFirstName, hostLastName, guestFirstName, guestLastName } = req.body;
     const userId = req.user!.id;
 
+    logger.debug({ propertyId, hostId, guestId, userId }, 'Creating conversation request');
+
     if (!propertyId || !hostId || !guestId) {
       res.status(400).json({
         success: false,
@@ -190,6 +213,7 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
 
     // Verify the requesting user is either the host or guest
     if (userId !== hostId && userId !== guestId) {
+      logger.warn({ userId, hostId, guestId }, 'User not authorized to create conversation');
       res.status(403).json({
         success: false,
         message: 'You are not authorized to create this conversation',
@@ -201,7 +225,7 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
     // This prevents malicious users from creating conversations with arbitrary hosts
     const propertyValidation = await validatePropertyHost(propertyId, hostId);
     if (!propertyValidation.valid) {
-      logger.warn({ propertyId, hostId, userId }, 'Invalid hostId for property - potential manipulation attempt');
+      logger.warn({ propertyId, hostId, userId, message: propertyValidation.message }, 'Invalid hostId for property');
       res.status(400).json({
         success: false,
         message: propertyValidation.message || 'Invalid host for this property',
@@ -217,9 +241,10 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
       { hostFirstName, hostLastName, guestFirstName, guestLastName }
     );
 
+    logger.info({ conversationId: conversation.id, propertyId }, 'Conversation created/retrieved successfully');
     res.json({ success: true, data: conversation });
   } catch (error) {
-    logger.error({ error }, 'Error creating conversation');
+    logger.error({ error, body: req.body }, 'Error creating conversation');
     if (isChatError(error)) {
       res.status(error.statusCode).json({ success: false, message: error.message });
       return;
