@@ -16,6 +16,7 @@ export const SOCKET_EVENTS = {
   USER_ONLINE: 'user:online',
   USER_OFFLINE: 'user:offline',
   ERROR: 'error',
+  UNREAD_COUNT_UPDATE: 'unread:update',
 } as const;
 
 export type SocketEvent = typeof SOCKET_EVENTS[keyof typeof SOCKET_EVENTS];

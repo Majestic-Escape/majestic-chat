@@ -80,6 +80,7 @@ const ConversationSchema = new Schema<IConversationDocument>(
 
 // Indexes
 ConversationSchema.index({ 'participants.userId': 1, updatedAt: -1 }); // User's conversations
+ConversationSchema.index({ 'participants.userId': 1, 'participants.role': 1, updatedAt: -1 }); // Role-filtered conversations
 ConversationSchema.index({ propertyId: 1, status: 1 }); // Property conversations
 ConversationSchema.index({ bookingId: 1 }, { sparse: true }); // Booking lookup
 

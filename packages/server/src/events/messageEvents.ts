@@ -9,6 +9,7 @@ import {
 } from '@majestic/chat-shared';
 import { TypedServer, TypedSocket } from '../socket/server';
 import { ChatService } from '../services/ChatService';
+import { UnreadCountService } from '../services/UnreadCountService';
 import { logger as baseLogger } from '../lib/logger';
 
 // Rate limiting state - tracks message counts per user
@@ -48,6 +49,7 @@ function checkRateLimit(userId: string): { allowed: boolean; retryAfter?: number
 
 export function registerMessageEvents(io: TypedServer, chatService: ChatService): void {
   const logger = baseLogger.child({ module: 'messageEvents' });
+  const unreadCountService = UnreadCountService.getInstance();
 
   io.on('connection', (socket: TypedSocket) => {
     // MESSAGE:SEND - Send a new message
@@ -78,7 +80,7 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
         const validated = SendMessageInputSchema.parse(data);
 
         // Send message via service
-        const message = await chatService.sendMessage({
+        const { message, recipientInfo } = await chatService.sendMessage({
           conversationId: validated.conversationId,
           senderId: user.id,
           content: validated.content,
@@ -92,6 +94,23 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
           message,
           conversationId: validated.conversationId,
         });
+
+        // Emit role-scoped unread count update to each recipient's personal room
+        for (const recipient of recipientInfo) {
+          try {
+            const totalUnread = await unreadCountService.getTotalUnread(
+              recipient.userId,
+              recipient.role as 'host' | 'guest'
+            );
+            io.to(`user:${recipient.userId}`).emit(SOCKET_EVENTS.UNREAD_COUNT_UPDATE, {
+              userId: recipient.userId,
+              totalUnread,
+              role: recipient.role,
+            });
+          } catch (err) {
+            logger.error({ err, recipientId: recipient.userId }, 'Error emitting unread count update');
+          }
+        }
 
         // Send acknowledgment
         callback?.({ success: true, messageId: message.id });
@@ -125,8 +144,8 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
         // Validate input
         const validated = ReadMessagesInputSchema.parse(data);
 
-        // Mark as read via service
-        await chatService.markAsRead(validated.conversationId, user.id, validated.messageIds);
+        // Mark as read via service (returns new total unread count + role)
+        const { newTotal, role } = await chatService.markAsRead(validated.conversationId, user.id, validated.messageIds);
 
         // Emit to conversation room
         const roomName = getRoomName(validated.conversationId);
@@ -137,8 +156,15 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
           timestamp: new Date(),
         });
 
+        // Emit role-scoped updated unread count to the reader's personal room
+        io.to(`user:${user.id}`).emit(SOCKET_EVENTS.UNREAD_COUNT_UPDATE, {
+          userId: user.id,
+          totalUnread: newTotal,
+          role,
+        });
+
         logger.info(
-          { userId: user.id, conversationId: validated.conversationId, count: validated.messageIds.length },
+          { userId: user.id, conversationId: validated.conversationId, role, count: validated.messageIds.length, newTotal },
           'Messages marked as read'
         );
       } catch (error) {
