@@ -15,12 +15,14 @@ import {
 import { MessageRepository } from '../repositories/MessageRepository';
 import { ConversationRepository } from '../repositories/ConversationRepository';
 import { ModerationService } from './ModerationService';
+import { UnreadCountService } from './UnreadCountService';
 import { logger } from '../lib/logger';
 
 export class ChatService {
   private messageRepo: MessageRepository;
   private conversationRepo: ConversationRepository;
   private moderationService: ModerationService;
+  private unreadCountService: UnreadCountService;
   private eventEmitter: EventEmitter;
   private logger = logger.child({ service: 'ChatService' });
 
@@ -28,6 +30,7 @@ export class ChatService {
     this.messageRepo = new MessageRepository();
     this.conversationRepo = new ConversationRepository();
     this.moderationService = new ModerationService();
+    this.unreadCountService = UnreadCountService.getInstance();
     this.eventEmitter = new EventEmitter();
   }
 
@@ -35,7 +38,7 @@ export class ChatService {
     return this.eventEmitter;
   }
 
-  async sendMessage(params: SendMessageParams): Promise<Message> {
+  async sendMessage(params: SendMessageParams): Promise<{ message: Message; recipientInfo: Array<{ userId: string; role: string }> }> {
     try {
       // Validate params
       const validated = SendMessageParamsSchema.parse(params);
@@ -47,11 +50,8 @@ export class ChatService {
         throw ChatError.notFound('conversation');
       }
 
-      // Verify sender is participant
-      const isParticipant = await this.conversationRepo.isUserParticipant(
-        validated.conversationId,
-        validated.senderId
-      );
+      // Verify sender is participant (using already-fetched conversation — no extra DB query)
+      const isParticipant = conversation.participants.some(p => p.userId === validated.senderId);
       if (!isParticipant) {
         throw ChatError.userNotParticipant();
       }
@@ -63,7 +63,7 @@ export class ChatService {
       );
       if (existing) {
         this.logger.debug({ messageId: existing.id }, 'Returning existing message (idempotent)');
-        return existing;
+        return { message: existing, recipientInfo: [] };
       }
 
       // Run moderation check
@@ -90,20 +90,28 @@ export class ChatService {
         status: MessageStatus.SENT,
       });
 
-      // Update conversation lastMessage
+      // Update conversation lastMessage (pass participant IDs to avoid extra DB query)
+      const participantUserIds = conversation.participants.map(p => p.userId);
       await this.conversationRepo.updateLastMessage(validated.conversationId, {
         content: validated.content.text || '[Attachment]',
         senderId: validated.senderId,
         sentAt: message.createdAt,
-      });
+      }, participantUserIds);
 
-      // Increment unread count for other participants
+      // Increment unread count for other participants (MongoDB + Redis)
+      const recipientInfo: Array<{ userId: string; role: string }> = [];
       for (const participant of conversation.participants) {
         if (participant.userId !== validated.senderId) {
           await this.conversationRepo.incrementUnreadCount(
             validated.conversationId,
             participant.userId
           );
+          // Directly recalculate and cache — avoids invalidate+get round-trip
+          await this.unreadCountService.recalculateUnread(
+            participant.userId,
+            participant.role as 'host' | 'guest'
+          );
+          recipientInfo.push({ userId: participant.userId, role: participant.role as string });
         }
       }
 
@@ -111,7 +119,7 @@ export class ChatService {
       this.eventEmitter.emit('message:created', { message, conversation });
 
       this.logger.info({ messageId: message.id }, 'Message sent successfully');
-      return message;
+      return { message, recipientInfo };
     } catch (error) {
       this.logger.error({ error }, 'Error sending message');
       throw error;
@@ -124,9 +132,9 @@ export class ChatService {
     options: PaginationOptions
   ): Promise<PaginatedResult<Message>> {
     try {
-      // Verify user is participant
-      const isParticipant = await this.conversationRepo.isUserParticipant(conversationId, userId);
-      if (!isParticipant) {
+      // Verify user is participant using cached findById (no separate query)
+      const conversation = await this.conversationRepo.findById(conversationId);
+      if (!conversation || !conversation.participants.some(p => p.userId === userId)) {
         throw ChatError.userNotParticipant();
       }
 
@@ -145,24 +153,28 @@ export class ChatService {
     }
   }
 
-  async markAsRead(conversationId: string, userId: string, messageIds: string[]): Promise<void> {
+  async markAsRead(conversationId: string, userId: string, messageIds: string[]): Promise<{ newTotal: number; role: string }> {
     try {
-      // Verify user is participant
-      const isParticipant = await this.conversationRepo.isUserParticipant(conversationId, userId);
-      if (!isParticipant) {
+      // Verify user is participant AND get their role in one query
+      const userRole = await this.unreadCountService.getUserRoleInConversation(userId, conversationId);
+      if (!userRole) {
         throw ChatError.userNotParticipant();
       }
 
       // Update readBy on messages (only for messages in this conversation)
       await this.messageRepo.updateReadBy(conversationId, messageIds, userId, new Date());
 
-      // Reset unread count
+      // Reset unread count in MongoDB
       await this.conversationRepo.resetUnreadCount(conversationId, userId);
+
+      // Recalculate total unread in Redis and return new total + role
+      const newTotal = await this.unreadCountService.recalculateUnread(userId, userRole);
 
       // Emit event
       this.eventEmitter.emit('messages:read', { conversationId, userId, messageIds });
 
-      this.logger.debug({ conversationId, userId, count: messageIds.length }, 'Messages marked as read');
+      this.logger.debug({ conversationId, userId, role: userRole, count: messageIds.length, newTotal }, 'Messages marked as read');
+      return { newTotal, role: userRole };
     } catch (error) {
       this.logger.error({ error, conversationId, userId }, 'Error marking messages as read');
       throw error;
@@ -178,6 +190,19 @@ export class ChatService {
       return conversations;
     } catch (error) {
       this.logger.error({ error, userId }, 'Error fetching conversations');
+      throw error;
+    }
+  }
+
+  async getConversationsByRole(userId: string, role: 'host' | 'guest'): Promise<Conversation[]> {
+    try {
+      const conversations = await this.conversationRepo.findByUserIdAndRole(userId, role);
+
+      this.logger.debug({ userId, role, count: conversations.length }, 'Conversations fetched by role');
+
+      return conversations;
+    } catch (error) {
+      this.logger.error({ error, userId, role }, 'Error fetching conversations by role');
       throw error;
     }
   }
@@ -233,14 +258,15 @@ export class ChatService {
 
   async getConversation(conversationId: string, userId: string): Promise<Conversation> {
     try {
+      // Single cached findById — no separate isUserParticipant query needed
       const conversation = await this.conversationRepo.findById(conversationId);
 
       if (!conversation) {
         throw ChatError.notFound('conversation');
       }
 
-      // Verify user is participant
-      const isParticipant = await this.conversationRepo.isUserParticipant(conversationId, userId);
+      // Check participant from already-fetched doc (in-memory, no DB query)
+      const isParticipant = conversation.participants.some(p => p.userId === userId);
       if (!isParticipant) {
         throw ChatError.userNotParticipant();
       }

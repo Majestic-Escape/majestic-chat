@@ -63,6 +63,7 @@ export interface ServerToClientEvents {
   }) => void;
   "user:online": (data: { userId: string }) => void;
   "user:offline": (data: { userId: string }) => void;
+  "unread:update": (data: { userId: string; totalUnread: number; role: string }) => void;
   error: (data: { code: string; message: string }) => void;
 }
 

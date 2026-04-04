@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { ChatService } from '../services/ChatService';
 import { ChatError, isChatError } from '@majestic/chat-shared';
 import { logger } from '../lib/logger';
+import { getRedisClient } from '../lib/redis';
 import jwt from 'jsonwebtoken';
 
 const router = Router();
@@ -36,14 +37,28 @@ interface PropertyApiResponse {
 }
 
 // Validate that the hostId matches the property's actual host
-// This fetches the property from the main API to verify ownership
+// Redis-cached: key prophost:{propertyId}, TTL: 1 hour
 async function validatePropertyHost(propertyId: string, hostId: string): Promise<PropertyValidationResult> {
   try {
+    // 1. Check Redis cache for resolved hostId
+    const redis = getRedisClient();
+    const cacheKey = `prophost:${propertyId}`;
+    const cachedHostId = await redis.get(cacheKey);
+    
+    if (cachedHostId) {
+      const isValid = String(cachedHostId) === String(hostId);
+      if (!isValid) {
+        logger.warn({ propertyId, cachedHostId, providedHostId: hostId }, 'Host ID mismatch (cached)');
+        return { valid: false, message: 'Host ID does not match property owner' };
+      }
+      return { valid: true };
+    }
+
+    // 2. Cache miss — fetch from API
     const apiBaseUrl = process.env.MAIN_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5005/api/v1';
     
     logger.debug({ apiBaseUrl, propertyId, hostId }, 'Validating property host');
     
-    // Create abort controller with timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
     
@@ -61,16 +76,12 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
         return { valid: false, message: 'Property not found' };
       }
       logger.warn({ propertyId, status: fetchResponse.status }, 'Failed to fetch property for validation - allowing request');
-      // On API error, allow the request but log it - don't block legitimate users
       return { valid: true };
     }
 
     const data = await fetchResponse.json() as PropertyApiResponse;
-    // API returns { success: true, data: property } structure
     const property = data.data || data.property || data;
 
-    // Check if the hostId matches the property's host
-    // Handle different possible host field structures
     let propertyHostId: string | undefined;
     if (typeof property.host === 'object' && property.host !== null) {
       propertyHostId = property.host._id || property.host.id;
@@ -82,11 +93,12 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
     
     if (!propertyHostId) {
       logger.warn({ propertyId }, 'Property has no host field - allowing request');
-      // Allow the request if we can't determine the host - don't block legitimate users
       return { valid: true };
     }
 
-    // Compare as strings to handle ObjectId vs string comparison
+    // 3. Cache the resolved hostId for 1 hour
+    await redis.setex(cacheKey, 3600, String(propertyHostId));
+
     if (String(propertyHostId) !== String(hostId)) {
       logger.warn({ propertyId, propertyHostId, providedHostId: hostId }, 'Host ID mismatch');
       return { valid: false, message: 'Host ID does not match property owner' };
@@ -95,14 +107,11 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
     logger.debug({ propertyId, hostId }, 'Property host validation successful');
     return { valid: true };
   } catch (error: any) {
-    // Check if it's an abort error (timeout)
     if (error?.name === 'AbortError') {
       logger.warn({ propertyId, hostId }, 'Property validation timed out - allowing request');
     } else {
       logger.error({ error, propertyId, hostId }, 'Error validating property host - allowing request');
     }
-    // On network/parsing error, allow the request but log it
-    // This prevents blocking legitimate users due to temporary API issues
     return { valid: true };
   }
 }
@@ -131,11 +140,19 @@ function verifyToken(req: AuthRequest, res: Response, next: NextFunction): void 
   }
 }
 
-// GET /api/chat/conversations - Get all conversations for user
+// GET /api/chat/conversations - Get conversations for user (supports role filtering)
 router.get('/conversations', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.id;
-    const conversations = await chatService.getConversations(userId);
+    const role = req.query.role as string | undefined;
+
+    let conversations;
+    if (role === 'host' || role === 'guest') {
+      // Server-side role filtering — avoids fetching all convs then discarding in JS
+      conversations = await chatService.getConversationsByRole(userId, role);
+    } else {
+      conversations = await chatService.getConversations(userId);
+    }
     
     res.json({ success: true, data: conversations });
   } catch (error) {
@@ -293,6 +310,39 @@ router.get('/conversations/:id/messages', verifyToken, async (req: AuthRequest, 
       return;
     }
     res.status(500).json({ success: false, message: 'Failed to fetch messages' });
+  }
+});
+
+// GET /api/chat/unread-count - Get total unread message count for user (role-scoped)
+router.get('/unread-count', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const role = (req.query.role as string) || 'guest';
+
+    const { UnreadCountService } = await import('../services/UnreadCountService');
+    const unreadCountService = UnreadCountService.getInstance();
+
+    // Support 'all' to return both host and guest counts in one call
+    if (role === 'all') {
+      const counts = await unreadCountService.getBothUnreadCounts(userId);
+      res.json({ success: true, data: { host: counts.host, guest: counts.guest } });
+      return;
+    }
+
+    if (role !== 'host' && role !== 'guest') {
+      res.status(400).json({ success: false, message: 'Invalid role. Must be "host", "guest", or "all".' });
+      return;
+    }
+    
+    const totalUnread = await unreadCountService.getTotalUnread(userId, role);
+    res.json({ success: true, data: { totalUnread, role } });
+  } catch (error) {
+    logger.error({ error }, 'Error fetching unread count');
+    if (isChatError(error)) {
+      res.status(error.statusCode).json({ success: false, message: error.message });
+      return;
+    }
+    res.status(500).json({ success: false, message: 'Failed to fetch unread count' });
   }
 });
 

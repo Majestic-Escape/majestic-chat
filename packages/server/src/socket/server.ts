@@ -95,6 +95,13 @@ export function createSocketServer(httpServer: HttpServer): TypedServer {
     
     logger.info(clientInfo, 'Client connected');
 
+    // Auto-join user to personal room for global notifications (e.g., unread count updates)
+    if (socket.data.user?.id) {
+      const userRoom = `user:${socket.data.user.id}`;
+      socket.join(userRoom);
+      logger.info({ socketId: socket.id, userRoom }, 'Auto-joined user personal room');
+    }
+
     // Log transport upgrades
     socket.conn.on('upgrade', (transport) => {
       logger.info({ socketId: socket.id, transport: transport.name }, 'Transport upgraded');

@@ -1,0 +1,1 @@
+{"root":["./src/index.ts","./src/server.ts","./src/types.ts","./src/constants/config.ts","./src/constants/events.ts","./src/errors/chaterror.ts","./src/moderation/patterns.ts","./src/schemas/conversation.schema.ts","./src/schemas/message.schema.ts","./src/types/chat.types.ts","./src/types/socket.types.ts"],"version":"5.9.3"}
