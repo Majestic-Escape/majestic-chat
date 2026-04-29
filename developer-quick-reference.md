@@ -29,14 +29,17 @@ railway link
 ### 2. Set Environment Variables
 
 ```env
-# Required
+# Required — DB-name segment encodes environment:
+#   majestic-chat          → production
+#   majestic-chat-dev      → staging (user.me.coderelix.in)
+#   majestic-chat-localdev → local development
 MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/majestic-chat
 REDIS_URL=redis://default:password@host:port
 JWT_SECRET=<same-secret-as-server.me>
 CORS_ORIGIN=https://www.majesticescape.in
 
 # Optional
-PORT=3001
+PORT=3002
 NODE_ENV=production
 AUTH_SERVICE_URL=https://api.majesticescape.in/auth/verify
 ```
