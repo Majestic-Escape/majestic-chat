@@ -63,29 +63,47 @@ This guide covers deploying the Majestic Chat server to Railway and configuring 
 
 ### Step 3: Add Environment Variables
 
+> **⚠️ Data isolation — read before pasting any URI**
+>
+> The chat server uses **the database-name segment of `MONGODB_URI` to separate environments** within the same Atlas cluster. Each deployment must use a different DB name, or dev/staging will read and write production conversations.
+>
+> | Deployment | Domain | Database name |
+> |---|---|---|
+> | Production | `majesticescape.in` | `majestic-chat` |
+> | Staging / Dev | `user.me.coderelix.in` | `majestic-chat-dev` |
+> | Local development | `localhost` | `majestic-chat-localdev` |
+>
+> Atlas creates the database lazily on first write — no manual setup needed. Just paste the right URI per Railway service.
+
 Go to **Variables** tab and add these variables:
+
+#### Production Environment Variables (`majesticescape.in`)
 
 | Variable       | Value                                                                                                                                 | Description                     |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| `MONGODB_URI`  | `mongodb+srv://admin:PASSWORD@cluster.mongodb.net/majestic-chat?retryWrites=true&w=majority&appName=Majestic-Escape&authSource=admin` | MongoDB connection string       |
+| `MONGODB_URI`  | `mongodb+srv://admin:PASSWORD@cluster.mongodb.net/majestic-chat?retryWrites=true&w=majority&appName=Majestic-Escape&authSource=admin` | Prod chat DB                    |
 | `REDIS_URL`    | `redis://default:PASSWORD@redis-host:port`                                                                                            | Redis connection string         |
 | `JWT_SECRET`   | `your-jwt-secret`                                                                                                                     | Must match server.me JWT secret |
 | `PORT`         | `3002`                                                                                                                                | Server port                     |
 | `NODE_ENV`     | `production`                                                                                                                          | Environment mode                |
-| `CORS_ORIGIN`  | `https://user.me.coderelix.in,https://admin.me.coderelix.in`                                                                          | Allowed frontend domains        |
-| `MAIN_API_URL` | `https://server-me.coderelix.in/api/v1`                                                                                               | Backend API URL                 |
+| `CORS_ORIGIN`  | `https://majesticescape.in,https://admin.majesticescape.in`                                                                           | Allowed frontend domains        |
+| `MAIN_API_URL` | `https://server.majesticescape.in/api/v1`                                                                                             | Backend API URL                 |
 
-#### Development Environment Variables
+#### Staging / Dev Environment Variables (`user.me.coderelix.in`)
+
+Same cluster, **different DB name** — `/majestic-chat-dev?` in the URI.
 
 ```
-MONGODB_URI=<copy from your .env file or MongoDB Atlas dashboard>
+MONGODB_URI=mongodb+srv://admin:PASSWORD@cluster.mongodb.net/majestic-chat-dev?retryWrites=true&w=majority&appName=Majestic-Escape&authSource=admin
 REDIS_URL=<copy from your Redis Cloud or Upstash dashboard>
-JWT_SECRET=<must match JWT_SECRET in server.me>
+JWT_SECRET=<must match JWT_SECRET in server.me's dev deployment>
 PORT=3002
 NODE_ENV=production
 CORS_ORIGIN=https://user.me.coderelix.in,https://admin.me.coderelix.in
 MAIN_API_URL=https://server-me.coderelix.in/api/v1
 ```
+
+> If you ever need to read prod data from staging for a one-off debug, swap the DB segment back to `majestic-chat`, redeploy, do the debug, then **swap back to `majestic-chat-dev` and redeploy again**. Don't leave staging pointed at prod.
 
 > **Note**: Get the actual values from your local `.env` file or from the respective service dashboards (MongoDB Atlas, Redis Cloud). Never commit secrets to version control.
 

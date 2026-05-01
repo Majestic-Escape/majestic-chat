@@ -206,7 +206,7 @@ The chat system uses the same JWT tokens as server.me. Token structure:
 }
 ```
 
-JWT_SECRET must match between server.me and chat server (currently: `secret126546`).
+JWT_SECRET must match between server.me and chat server. Get the value from your environment's secrets store (Vercel / Railway dashboard, or local `.env` files) — never hard-code or document the actual secret here.
 
 ## 📱 Mobile Optimization
 
