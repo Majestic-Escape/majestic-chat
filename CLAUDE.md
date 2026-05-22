@@ -60,10 +60,11 @@ Default port: `3002` (overridable via `PORT`).
 
 Required:
 - `JWT_SECRET` — must equal `server.me`'s secret so user tokens validate.
-- `MONGODB_URI` — Atlas connection string. **DB-name segment encodes which environment**:
-  - `majestic-chat` → production (Railway, `majesticescape.in`)
-  - `majestic-chat-dev` → staging/dev (Railway, `user.me.coderelix.in`)
-  - `majestic-chat-localdev` → local dev only
+- `MONGODB_URI` — Atlas connection string. **Cluster + DB-name encode the env**:
+  - Prod   (Railway, `majesticescape.in`):     `…@majesticescapewebsite.nvgz1dl.mongodb.net/majestic-chat?…`
+  - Dev    (Railway, `user.me.coderelix.in`):  `…@majestic-escape.nk49u.mongodb.net/majestic-chat-dev?…`
+  - Local                                    : `…@majestic-escape.nk49u.mongodb.net/majestic-chat-localdev?…`
+  - **Prod was migrated from `nk49u` → `nvgz1dl` on 2026-05-22** to put prod chat on the real prod cluster (same one as server.me prod), giving cluster-level isolation from dev/local — not just DB-name separation. Before the move, `nk49u/majestic-chat` had accumulated months of dev-era test conversations (pre-`-dev`/`-localdev` split) that surfaced on prod `/messages`; those were purged and the 6 real-property conversations were copied across as part of the migration.
 
 Optional:
 - `REDIS_URL` — enables horizontal scaling via Redis adapter; safe to omit locally
@@ -74,9 +75,16 @@ Optional:
 
 ## Data isolation — critical
 
-`server.me` (auth/users) and this chat server share the same Atlas cluster but different databases. The DB segment in `MONGODB_URI` is the **only** thing separating prod chat from dev chat from local chat. Do not "fix" a misbehaving local server by pasting in the prod URI — you'll write to real customer threads.
+Production lives on a **different Atlas cluster** from dev/local:
 
-If you see suspicious "production-looking" data in dev, the first thing to check is the DB segment of `MONGODB_URI` in whichever env you're running.
+- **Prod chat**: `nvgz1dl` cluster (`majesticescapewebsite.nvgz1dl.mongodb.net`), DB `majestic-chat`. Same cluster as `server.me` prod (`master-db` lives there too — separate DB). Credentials: `majesticescapein_db_user`.
+- **Dev + local chat**: `nk49u` cluster (`majestic-escape.nk49u.mongodb.net`), DBs `majestic-chat-dev` and `majestic-chat-localdev`. Same cluster as `server.me` preview (`master-db` lives there too — separate DB). Credentials: `admin`.
+
+Different clusters mean different credentials AND different hostnames — a DB-name typo can no longer cross prod and dev. Inside `nk49u` the DB-name still separates dev from local (and the historical un-suffixed `majestic-chat` DB still exists there as a fallback backup of the pre-migration prod data; do not write to it). Do not "fix" a misbehaving local server by pasting in the prod URI — you'll write to real customer threads.
+
+If you see suspicious "production-looking" data in dev (or vice-versa), check **which cluster** the URI points at first, then the DB segment.
+
+Pre-migration history: before 2026-05-22, prod chat lived on `nk49u/majestic-chat` (shared cluster with dev/local). Months of pre-split dev test conversations had accumulated in that DB and were surfacing on prod `/messages` — that's why the move happened.
 
 ## Auth model
 
