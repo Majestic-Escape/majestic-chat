@@ -2,3 +2,11 @@ node_modules/
 dist/
 .env
 *.log
+
+# Local env backups. `local-dev/patch-env-ips.ps1` writes .env.bak on every run,
+# and manual fixes leave .env.<reason>.bak files behind. These hold full Atlas
+# and Redis credentials — they were previously untracked but NOT ignored, one
+# `git add -A` away from being published. Never commit them.
+.env.bak
+.env.*.bak
+*.env.bak

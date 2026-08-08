@@ -106,6 +106,30 @@ Add to `routes/conversationRoutes.ts` (or create a sibling under `routes/`). Mou
 ### Changing a Mongo schema
 Update the Mongoose model under `repositories/`, AND update the corresponding Zod/TS type in `packages/shared`. Run a quick scan of `services/` for `.find()` / `.update()` calls that may now mismatch.
 
+## Upstash keep-alive cron
+
+`.github/workflows/redis-keepalive.yml` PINGs the Upstash instance and touches a
+`keepalive:last-run` key every 5 days. **Upstash archives free-tier databases
+after a minimum of 30 days of inactivity** — and this repo's Socket.IO adapter,
+conversation cache and unread counts all live there, so archival means a cold,
+broken chat backend.
+
+Requires a `REDIS_URL` **repo secret** (Settings → Secrets and variables →
+Actions). The workflow splits the URL into host/port/password so the credential
+travels via `REDISCLI_AUTH` in the environment and never appears in argv.
+
+Two caveats that are easy to get wrong:
+
+- `cron: "0 6 */5 * *"` is **not** literally every 5 days. It fires on days 1, 6,
+  11, 16, 21, 26 and resets at the month boundary, so the worst-case gap is
+  **6 days** (26th → 1st). Still well inside the 30-day window.
+- **GitHub disables scheduled workflows after 60 days of repository inactivity,
+  and only new commits reset that timer** — issues, PRs, tags and manual
+  `workflow_dispatch` runs do not count. A quiet period here would silently kill
+  the schedule. That is why a PING-only backup copy lives in
+  `majestic-escape-ops`, which is actively committed. Either workflow alone keeps
+  the database warm; don't delete one assuming the other is redundant noise.
+
 ## Testing & deploy
 
 - `npm run lint` (ESLint) and `npm run test` (Jest) at workspace root run across all packages.
