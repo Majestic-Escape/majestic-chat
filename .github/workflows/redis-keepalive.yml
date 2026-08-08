@@ -62,10 +62,18 @@ jobs:
           node -e '
             const u = new URL(process.env.REDIS_URL);
             const fs = require("fs");
-            // Only host/port reach the log or outputs — never the password.
+            const pw = decodeURIComponent(u.password);
+            // ::add-mask:: MUST come before the password is written anywhere.
+            // GitHub only auto-masks the registered secret itself (the whole
+            // REDIS_URL string); a component extracted from it is a brand-new
+            // value it has no reason to redact, and Actions echoes each step`s
+            // env: block — so without this the password is printed in clear
+            // text in the run log. Registering it here masks it everywhere for
+            // the rest of the job.
+            console.log(`::add-mask::${pw}`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `host=${u.hostname}\n`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `port=${u.port || 6379}\n`);
-            fs.appendFileSync(process.env.GITHUB_ENV, `REDISCLI_AUTH=${decodeURIComponent(u.password)}\n`);
+            fs.appendFileSync(process.env.GITHUB_ENV, `REDISCLI_AUTH=${pw}\n`);
           '
 
       - name: PING + touch keep-alive key
