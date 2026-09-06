@@ -19,8 +19,21 @@ name: Upstash Redis keep-alive (primary)
 # which is actively committed. Either workflow alone is enough to keep the
 # database warm. GitHub also emails the repo owner on auto-disable.
 #
-# Secret required: REDIS_URL (rediss://…upstash.io:6379) — add under
-# Settings -> Secrets and variables -> Actions.
+# ── Two databases are kept alive ──────────────────────────────────────────────
+# REDIS_URL      (required) — production Upstash instance.
+# REDIS_URL_DEV  (optional) — the Development environment's Upstash instance.
+#
+# The dev database needs this more than production does, not less. Production is
+# pinged constantly by real traffic; the Development chat-server was the ONLY
+# thing touching its Upstash, and that service is now stopped to save cost. With
+# nothing writing to it, the 30-day archival clock is actually running.
+#
+# REDIS_URL_DEV is deliberately OPTIONAL and skips cleanly when unset, so this
+# workflow keeps protecting production whether or not the dev secret exists yet.
+# The production target still fails loudly if its secret is missing — a silent
+# skip there would defeat the entire purpose.
+#
+# Add both under Settings -> Secrets and variables -> Actions.
 
 on:
   schedule:
@@ -38,6 +51,17 @@ permissions:
 jobs:
   keepalive:
     runs-on: ubuntu-22.04
+    strategy:
+      # Independent databases: a dev-side failure must never mask or cancel the
+      # production keep-alive.
+      fail-fast: false
+      matrix:
+        include:
+          - target: production
+            required: "true"
+          - target: development
+            required: "false"
+    name: keepalive (${{ matrix.target }})
     steps:
       - name: Install redis-tools
         run: |
@@ -52,12 +76,19 @@ jobs:
       - name: Parse connection details
         id: conn
         env:
-          REDIS_URL: ${{ secrets.REDIS_URL }}
+          REDIS_URL: ${{ matrix.target == 'production' && secrets.REDIS_URL || secrets.REDIS_URL_DEV }}
+          REQUIRED: ${{ matrix.required }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           if [ -z "${REDIS_URL:-}" ]; then
-            echo "::error::REDIS_URL secret is not set on this repository."
-            exit 1
+            if [ "$REQUIRED" = "true" ]; then
+              echo "::error::REDIS_URL secret is not set on this repository."
+              exit 1
+            fi
+            echo "::notice::No secret configured for '$TARGET' — skipping (this is not a failure)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           node -e '
             const u = new URL(process.env.REDIS_URL);
@@ -77,6 +108,7 @@ jobs:
           '
 
       - name: PING + touch keep-alive key
+        if: steps.conn.outputs.skip != 'true'
         env:
           HOST: ${{ steps.conn.outputs.host }}
           PORT: ${{ steps.conn.outputs.port }}
@@ -100,13 +132,13 @@ jobs:
           echo "Upstash keep-alive completed."
 
       - name: Open issue on failure
-        if: failure()
+        if: failure() && steps.conn.outputs.skip != 'true'
         uses: actions/github-script@v7
         with:
           script: |
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `❌ Upstash Redis keep-alive failed — run #${context.runNumber}`,
+              title: `❌ Upstash Redis keep-alive failed (${{ matrix.target }}) — run #${context.runNumber}`,
               body: `Workflow **${context.workflow}** failed. If this keeps failing, the Upstash database risks archival after 30 days of inactivity.\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
             })
