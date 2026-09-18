@@ -8,9 +8,22 @@ import { registerMessageEvents } from './events/messageEvents';
 import { registerTypingEvents } from './events/typingEvents';
 import { ChatService } from './services/ChatService';
 import { conversationRoutes } from './routes/conversationRoutes';
+import { getRedisClient } from './lib/redis';
+import { createShutdown } from './lib/shutdown';
 import { logger } from './lib/logger';
 
 const PORT = process.env.PORT || 3001;
+
+// A rejected promise nobody awaited (a dropped Redis publish, a late cache
+// write) must never take the process down with every socket on it. Log and
+// carry on; the failing operation has already degraded on its own.
+process.on('unhandledRejection', (reason) => {
+  logger.error({ reason: reason instanceof Error ? reason.message : String(reason) }, 'Unhandled promise rejection (ignored)');
+});
+process.on('uncaughtException', (error) => {
+  logger.fatal({ error }, 'Uncaught exception');
+  process.exit(1);
+});
 
 // Validate required environment variables at startup
 function validateEnvironment(): void {
@@ -46,6 +59,18 @@ async function startServer() {
     // Connect to MongoDB
     await connectDatabase();
     logger.info('Database connected');
+
+    // Open the cache client now so the first request does not pay (or skip)
+    // the connection; without REDIS_URL the cache simply stays off.
+    if (process.env.REDIS_URL) {
+      try {
+        getRedisClient();
+      } catch (error) {
+        logger.warn({ error }, 'Redis cache client not started');
+      }
+    } else {
+      logger.warn('REDIS_URL not set — running without cache and single-instance broadcast');
+    }
 
     // Create Express app
     const app = express();
@@ -90,22 +115,10 @@ async function startServer() {
       logger.info(`WebSocket: ws://localhost:${PORT}`);
     });
 
-    // Graceful shutdown
-    process.on('SIGTERM', async () => {
-      logger.info('SIGTERM received, shutting down gracefully');
-      httpServer.close(() => {
-        logger.info('Server closed');
-        process.exit(0);
-      });
-    });
-
-    process.on('SIGINT', async () => {
-      logger.info('SIGINT received, shutting down gracefully');
-      httpServer.close(() => {
-        logger.info('Server closed');
-        process.exit(0);
-      });
-    });
+    // Graceful shutdown (sockets first, then Redis and Mongo; see lib/shutdown)
+    const shutdown = createShutdown(io);
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
   } catch (error) {
     logger.error({ error }, 'Failed to start server');
     process.exit(1);

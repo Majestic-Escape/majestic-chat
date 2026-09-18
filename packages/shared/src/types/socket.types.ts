@@ -1,27 +1,48 @@
 import { z } from "zod";
-import { Message, MessageContentSchema, MessageTypeSchema } from "./chat.types";
+import { Message, MessageContentSchema, MessageTypeSchema, ReplyToInputSchema, OBJECT_ID_RE } from "./chat.types";
+import { CHAT_CONFIG } from "../constants/config";
+
+// Every client→server payload is validated against one of these before any
+// field is read (a malformed payload must never reach a handler, let alone a
+// catch block). Ids are Mongo ObjectIds; arrays and free strings are bounded
+// so no event can carry an unbounded amount of work into the server.
+const ObjectIdSchema = z.string().regex(OBJECT_ID_RE, { message: "Invalid id" });
 
 // Input types
 export const SendMessageInputSchema = z.object({
-  conversationId: z.string(),
+  conversationId: ObjectIdSchema,
   content: MessageContentSchema,
   type: MessageTypeSchema,
-  clientMessageId: z.string(),
+  clientMessageId: z.string().min(1).max(CHAT_CONFIG.MAX_CLIENT_MESSAGE_ID_LENGTH),
+  // Only the id: the quoted text/author are resolved server-side (see ReplyRef)
+  replyTo: ReplyToInputSchema.optional(),
 });
 
 export type SendMessageInput = z.infer<typeof SendMessageInputSchema>;
 
 export const ReadMessagesInputSchema = z.object({
-  conversationId: z.string(),
-  messageIds: z.array(z.string()),
+  conversationId: ObjectIdSchema,
+  messageIds: z.array(ObjectIdSchema).max(CHAT_CONFIG.MAX_READ_BATCH),
 });
 
 export type ReadMessagesInput = z.infer<typeof ReadMessagesInputSchema>;
+
+// conversation:join / conversation:leave / typing:start / typing:stop
+export const ConversationRefInputSchema = z.object({
+  conversationId: ObjectIdSchema,
+});
+
+export type ConversationRefInput = z.infer<typeof ConversationRefInputSchema>;
 
 export const MessageResponseSchema = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
   error: z.string().optional(),
+  // ChatError code on failure (VALIDATION_ERROR, MESSAGE_NOT_FOUND, RATE_LIMITED,
+  // INTERNAL_ERROR, ...). Lets a client tell a definitive rejection ("nothing
+  // was stored") from an ambiguous failure it must retry with the same
+  // clientMessageId.
+  code: z.string().optional(),
 });
 
 export type MessageResponse = z.infer<typeof MessageResponseSchema>;
@@ -63,7 +84,9 @@ export interface ServerToClientEvents {
   }) => void;
   "user:online": (data: { userId: string }) => void;
   "user:offline": (data: { userId: string }) => void;
-  "unread:update": (data: { userId: string; totalUnread: number; role: string }) => void;
+  // conversationId (additive): the conversation whose change produced this
+  // total, so a client can refresh/join a conversation it has not seen yet.
+  "unread:update": (data: { userId: string; totalUnread: number; role: string; conversationId?: string }) => void;
   error: (data: { code: string; message: string }) => void;
 }
 

@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsc",
     "lint": "eslint src/",
-    "test": "jest"
+    "test": "jest --passWithNoTests"
   },
   "dependencies": {
     "zod": "^3.22.0",

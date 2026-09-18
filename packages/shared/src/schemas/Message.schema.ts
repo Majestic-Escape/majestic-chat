@@ -5,6 +5,7 @@ import {
   MessageStatus,
   ModerationStatus,
 } from '../types/chat.types';
+import { CHAT_CONFIG } from '../constants/config';
 
 export interface IMessageDocument extends Omit<Message, 'id'>, Document {
   _id: mongoose.Types.ObjectId;
@@ -85,6 +86,14 @@ const MessageSchema = new Schema<IMessageDocument>(
     deletedAt: {
       type: Date,
     },
+    // Server-derived snapshot of the quoted message (see ReplyRefSchema).
+    // Nested path, not a sub-schema: no _id, absent on plain messages.
+    replyTo: {
+      messageId: { type: String },
+      senderId: { type: String },
+      text: { type: String, maxlength: CHAT_CONFIG.REPLY_SNIPPET_MAX },
+      type: { type: String, enum: Object.values(MessageType) },
+    },
   },
   {
     timestamps: true,
@@ -111,7 +120,11 @@ const MessageSchema = new Schema<IMessageDocument>(
 );
 
 // Indexes
-MessageSchema.index({ conversationId: 1, createdAt: -1 }); // Message loading
+// Message loading + cursor pagination: sorted by (createdAt, _id) so ties in
+// createdAt have a deterministic order the index can serve without a blocking
+// sort. (The older { conversationId, createdAt } index remains on existing
+// deployments until dropped by hand; it is a strict prefix of this one.)
+MessageSchema.index({ conversationId: 1, createdAt: -1, _id: -1 }); // Message loading
 MessageSchema.index({ conversationId: 1, clientMessageId: 1 }, { unique: true }); // Idempotency
 MessageSchema.index({ senderId: 1, createdAt: -1 }); // User history
 MessageSchema.index({ 'moderation.status': 1, createdAt: -1 }); // Moderation queue

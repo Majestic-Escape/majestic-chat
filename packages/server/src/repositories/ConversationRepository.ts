@@ -6,7 +6,7 @@ import {
   Participant,
   LastMessage,
 } from '@majestic/chat-shared';
-import { getRedisClient } from '../lib/redis';
+import { cacheGet, cacheSetEx, cacheDel } from '../lib/cache';
 import { logger } from '../lib/logger';
 
 // Redis TTLs
@@ -35,32 +35,20 @@ export class ConversationRepository {
    * Invalidate a single conversation cache.
    */
   private async invalidateConv(id: string): Promise<void> {
-    try {
-      const redis = getRedisClient();
-      await redis.del(this.convKey(id));
-    } catch (e) {
-      this.logger.warn({ e, id }, 'Redis invalidation failed (conv)');
-    }
+    await cacheDel(this.convKey(id));
   }
 
   /**
    * Invalidate conversation list cache for specific user(s).
    */
   private async invalidateConvList(...userIds: string[]): Promise<void> {
-    try {
-      const redis = getRedisClient();
-      const keys: string[] = [];
-      for (const userId of userIds) {
-        keys.push(this.convListKey(userId));
-        keys.push(this.convListRoleKey(userId, 'host'));
-        keys.push(this.convListRoleKey(userId, 'guest'));
-      }
-      if (keys.length > 0) {
-        await redis.del(...keys);
-      }
-    } catch (e) {
-      this.logger.warn({ e }, 'Redis invalidation failed (convlist)');
+    const keys: string[] = [];
+    for (const userId of userIds) {
+      keys.push(this.convListKey(userId));
+      keys.push(this.convListRoleKey(userId, 'host'));
+      keys.push(this.convListRoleKey(userId, 'guest'));
     }
+    await cacheDel(...keys);
   }
 
   // ─── CRUD Operations ──────────────────────────────────────────
@@ -96,9 +84,8 @@ export class ConversationRepository {
    */
   async findById(id: string): Promise<Conversation | null> {
     try {
-      // 1. Check Redis cache
-      const redis = getRedisClient();
-      const cached = await redis.get(this.convKey(id));
+      // 1. Check Redis cache (optional — a miss when Redis is unavailable)
+      const cached = await cacheGet(this.convKey(id));
       if (cached) {
         return JSON.parse(cached);
       }
@@ -110,7 +97,7 @@ export class ConversationRepository {
       const result = this.transformDocument(conversation);
 
       // 3. Cache for next time
-      await redis.setex(this.convKey(id), CONV_TTL, JSON.stringify(result));
+      await cacheSetEx(this.convKey(id), CONV_TTL, JSON.stringify(result));
 
       return result;
     } catch (error) {
@@ -160,10 +147,9 @@ export class ConversationRepository {
    */
   async findByUserId(userId: string, limit: number = 50): Promise<Conversation[]> {
     try {
-      // 1. Check Redis cache
-      const redis = getRedisClient();
+      // 1. Check Redis cache (optional)
       const cacheKey = this.convListKey(userId);
-      const cached = await redis.get(cacheKey);
+      const cached = await cacheGet(cacheKey);
       if (cached) {
         return JSON.parse(cached);
       }
@@ -178,7 +164,7 @@ export class ConversationRepository {
       const result = conversations.map((conv) => this.transformDocument(conv));
 
       // 3. Cache for next time
-      await redis.setex(cacheKey, CONVLIST_TTL, JSON.stringify(result));
+      await cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));
 
       return result;
     } catch (error) {
@@ -195,10 +181,9 @@ export class ConversationRepository {
    */
   async findByUserIdAndRole(userId: string, role: 'host' | 'guest', limit: number = 50): Promise<Conversation[]> {
     try {
-      // 1. Check Redis cache
-      const redis = getRedisClient();
+      // 1. Check Redis cache (optional)
       const cacheKey = this.convListRoleKey(userId, role);
-      const cached = await redis.get(cacheKey);
+      const cached = await cacheGet(cacheKey);
       if (cached) {
         return JSON.parse(cached);
       }
@@ -215,7 +200,7 @@ export class ConversationRepository {
       const result = conversations.map((conv) => this.transformDocument(conv));
 
       // 3. Cache for next time
-      await redis.setex(cacheKey, CONVLIST_TTL, JSON.stringify(result));
+      await cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));
 
       return result;
     } catch (error) {
@@ -236,6 +221,15 @@ export class ConversationRepository {
   }
 
   // ─── Write Operations (with cache invalidation) ──────────────
+
+  /**
+   * Drop the Redis copies of a conversation and its participants' lists after
+   * the document changed elsewhere (e.g. inside a message transaction).
+   */
+  async invalidateAfterMessage(conversationId: string, participantUserIds: string[]): Promise<void> {
+    await this.invalidateConv(conversationId);
+    if (participantUserIds.length > 0) await this.invalidateConvList(...participantUserIds);
+  }
 
   async updateLastMessage(conversationId: string, lastMessage: LastMessage, participantUserIds?: string[]): Promise<void> {
     try {
@@ -284,16 +278,28 @@ export class ConversationRepository {
     }
   }
 
-  async resetUnreadCount(conversationId: string, userId: string): Promise<void> {
+  /**
+   * Zero the reader's unread counter. Returns whether anything changed; only
+   * then are the cached conversation AND the reader's conversation lists
+   * dropped (the lists carry the per-conversation badge — leaving them cached
+   * showed a stale unread badge for up to CONVLIST_TTL after reading).
+   */
+  async resetUnreadCount(conversationId: string, userId: string): Promise<boolean> {
     try {
-      await this.model.findByIdAndUpdate(conversationId, {
-        $set: { [`unreadCount.${userId}`]: 0 },
-      });
+      const field = `unreadCount.${userId}`;
+      const result = await this.model.updateOne(
+        { _id: conversationId, [field]: { $gt: 0 } },
+        { $set: { [field]: 0 } }
+      );
+      const changed = result.modifiedCount > 0;
 
-      this.logger.debug({ conversationId, userId }, 'Unread count reset');
+      this.logger.debug({ conversationId, userId, changed }, 'Unread count reset');
 
-      // Invalidate conversation cache (unreadCount changed)
-      await this.invalidateConv(conversationId);
+      if (changed) {
+        await this.invalidateConv(conversationId);
+        await this.invalidateConvList(userId);
+      }
+      return changed;
     } catch (error) {
       this.logger.error({ error, conversationId, userId }, 'Error resetting unread count');
       throw ChatError.database('Failed to reset unread count');

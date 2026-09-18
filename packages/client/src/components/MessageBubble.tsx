@@ -27,6 +27,14 @@ export function MessageBubble({
       )}
       
       <div className="message-bubble__content">
+        {message.replyTo && (
+          <div className="message-bubble__quote" data-quoted-id={message.replyTo.messageId}>
+            <div className="message-bubble__quote-author">
+              {message.replyTo.senderId === currentUserId ? 'You' : message.replyTo.senderId}
+            </div>
+            <div className="message-bubble__quote-text">{message.replyTo.text || '[Attachment]'}</div>
+          </div>
+        )}
         {message.content.text && (
           <div className="message-bubble__text">{message.content.text}</div>
         )}
