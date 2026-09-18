@@ -14,5 +14,10 @@
     "lint": "npm run lint --workspaces",
     "test": "npm run test -w @majestic/chat-server",
     "clean": "rm -rf packages/*/dist"
+  },
+  "config": {
+    "mongodbMemoryServer": {
+      "disablePostinstall": "1"
+    }
   }
 }
