@@ -158,22 +158,27 @@ export class MessageRepository {
       const { limit, cursor, direction } = options;
 
       const query: any = { conversationId };
+      const desc = direction === 'before';
 
-      // Apply cursor-based pagination
+      // Cursor-based pagination on (createdAt, _id): two messages committed in
+      // the same millisecond are ordered by _id, so pages never skip or repeat
+      // a message with a tied timestamp. The cursor must belong to this
+      // conversation (a foreign id is simply ignored).
       if (cursor) {
-        const cursorMessage = await this.model.findById(cursor).lean();
+        const cursorMessage = await this.model.findOne({ _id: cursor, conversationId }).lean();
         if (cursorMessage) {
-          query.createdAt =
-            direction === 'before'
-              ? { $lt: cursorMessage.createdAt }
-              : { $gt: cursorMessage.createdAt };
+          const op = desc ? '$lt' : '$gt';
+          query.$or = [
+            { createdAt: { [op]: cursorMessage.createdAt } },
+            { createdAt: cursorMessage.createdAt, _id: { [op]: cursorMessage._id } },
+          ];
         }
       }
 
       // Fetch one extra to determine if there are more results
       const messages = await this.model
         .find(query)
-        .sort({ createdAt: direction === 'before' ? -1 : 1 })
+        .sort(desc ? { createdAt: -1, _id: -1 } : { createdAt: 1, _id: 1 })
         .limit(limit + 1)
         .lean();
 

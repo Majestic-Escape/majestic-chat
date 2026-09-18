@@ -117,14 +117,16 @@ describe('sendMessage with replyTo', () => {
   it('quotes attachment-only, text+attachment and every message type', async () => {
     const conv = await makeConversation();
     const att = { id: 'a1', url: 'https://x.test/a.png', type: 'image' as const, filename: 'a.png', size: 10, mimeType: 'image/png' };
-    const { message: onlyAtt } = await service.sendMessage({
+    // No client may send attachments until an upload path exists (schema
+    // rejects them); such originals can only be legacy rows, so seed them
+    // directly and make sure they still quote correctly.
+    await expect(service.sendMessage({
       conversationId: conv, senderId: HOST_ID, type: MessageType.IMAGE, clientMessageId: cid(), content: { attachments: [att] },
-    });
-    const { message: both } = await service.sendMessage({
-      conversationId: conv, senderId: HOST_ID, type: MessageType.IMAGE, clientMessageId: cid(), content: { text: 'see pic', attachments: [att] },
-    });
-    const r1 = await text(conv, GUEST_ID, 'r1', { replyTo: { messageId: onlyAtt.id } });
-    const r2 = await text(conv, GUEST_ID, 'r2', { replyTo: { messageId: both.id } });
+    })).rejects.toThrow();
+    const onlyAtt = await MessageModel.create({ conversationId: conv, senderId: HOST_ID, clientMessageId: cid(), type: MessageType.IMAGE, content: { attachments: [att] }, moderation: { status: 'clean', flags: [], confidence: 0 }, readBy: [], status: 'sent' });
+    const both = await MessageModel.create({ conversationId: conv, senderId: HOST_ID, clientMessageId: cid(), type: MessageType.IMAGE, content: { text: 'see pic', attachments: [att] }, moderation: { status: 'clean', flags: [], confidence: 0 }, readBy: [], status: 'sent' });
+    const r1 = await text(conv, GUEST_ID, 'r1', { replyTo: { messageId: onlyAtt._id.toString() } });
+    const r2 = await text(conv, GUEST_ID, 'r2', { replyTo: { messageId: both._id.toString() } });
     expect(r1.message.replyTo).toMatchObject({ text: '[Attachment]', type: 'image' });
     expect(r2.message.replyTo).toMatchObject({ text: 'see pic', type: 'image' });
     for (const type of Object.values(MessageType)) {

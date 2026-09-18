@@ -9,7 +9,13 @@ import {
   CHAT_CONFIG,
 } from '@majestic/chat-shared';
 import { getPubSubClients } from '../lib/redis';
+import { verifyWithMainApi } from '../lib/session';
 import { logger } from '../lib/logger';
+import jwt from 'jsonwebtoken';
+
+// A socket can outlive its token by days. Re-check the signature/expiry and
+// the main-API verdict now and then and drop sockets whose session is gone.
+const SESSION_RECHECK_MS = 15 * 60 * 1000;
 
 export type TypedServer = Server<
   ClientToServerEvents,
@@ -107,7 +113,27 @@ export function createSocketServer(httpServer: HttpServer): TypedServer {
       logger.info({ socketId: socket.id, transport: transport.name }, 'Transport upgraded');
     });
 
+    // Periodic session re-check (expired token, logout-all, ban, deleted user)
+    const recheck = setInterval(async () => {
+      const token = socket.handshake.auth?.token;
+      let alive = typeof token === 'string';
+      if (alive) {
+        try {
+          jwt.verify(token, process.env.JWT_SECRET as string);
+        } catch {
+          alive = false;
+        }
+      }
+      if (alive && (await verifyWithMainApi(token)) === 'rejected') alive = false;
+      if (!alive) {
+        logger.warn({ socketId: socket.id, userId: socket.data.user?.id }, 'Session no longer valid — disconnecting socket');
+        socket.disconnect(true);
+      }
+    }, SESSION_RECHECK_MS);
+    recheck.unref();
+
     socket.on('disconnect', (reason) => {
+      clearInterval(recheck);
       connectionCount--;
       logger.info({ 
         socketId: socket.id, 

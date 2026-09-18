@@ -69,15 +69,12 @@ export class ChatService {
       const validated = SendMessageParamsSchema.parse(params);
       this.logger.debug({ conversationId: validated.conversationId }, 'Sending message');
 
-      // Verify conversation exists
+      // Verify the conversation exists AND the sender is a participant. One
+      // answer for both failures: a caller must not be able to tell a foreign
+      // conversation from a non-existent one (no existence oracle on ids).
       const conversation = await this.conversationRepo.findById(validated.conversationId);
-      if (!conversation) {
-        throw ChatError.notFound('conversation');
-      }
-
-      // Verify sender is participant (using already-fetched conversation — no extra DB query)
-      const isParticipant = conversation.participants.some(p => p.userId === validated.senderId);
-      if (!isParticipant) {
+      const isParticipant = !!conversation && conversation.participants.some(p => p.userId === validated.senderId);
+      if (!conversation || !isParticipant) {
         throw ChatError.userNotParticipant();
       }
 
@@ -202,13 +199,18 @@ export class ChatService {
       }
 
       // Update readBy on messages (only for messages in this conversation)
-      await this.messageRepo.updateReadBy(conversationId, messageIds, userId, new Date());
+      if (messageIds.length > 0) {
+        await this.messageRepo.updateReadBy(conversationId, messageIds, userId, new Date());
+      }
 
-      // Reset unread count in MongoDB
-      await this.conversationRepo.resetUnreadCount(conversationId, userId);
-
-      // Recalculate total unread in Redis and return new total + role
-      const newTotal = await this.unreadCountService.recalculateUnread(userId, userRole);
+      // Reset unread count in MongoDB. Only a change invalidates the cached
+      // conversation + the reader's lists (the list carries per-conversation
+      // unread badges) and forces a recount; re-reading an already-read thread
+      // costs one cached lookup and no Redis writes.
+      const changed = await this.conversationRepo.resetUnreadCount(conversationId, userId);
+      const newTotal = changed
+        ? await this.unreadCountService.recalculateUnread(userId, userRole)
+        : await this.unreadCountService.getTotalUnread(userId, userRole);
 
       // Emit event
       this.eventEmitter.emit('messages:read', { conversationId, userId, messageIds });
@@ -298,16 +300,11 @@ export class ChatService {
 
   async getConversation(conversationId: string, userId: string): Promise<Conversation> {
     try {
-      // Single cached findById — no separate isUserParticipant query needed
+      // Single cached findById — no separate isUserParticipant query needed.
+      // Unknown and foreign conversations get the same answer (no oracle).
       const conversation = await this.conversationRepo.findById(conversationId);
-
-      if (!conversation) {
-        throw ChatError.notFound('conversation');
-      }
-
-      // Check participant from already-fetched doc (in-memory, no DB query)
-      const isParticipant = conversation.participants.some(p => p.userId === userId);
-      if (!isParticipant) {
+      const isParticipant = !!conversation && conversation.participants.some(p => p.userId === userId);
+      if (!conversation || !isParticipant) {
         throw ChatError.userNotParticipant();
       }
 

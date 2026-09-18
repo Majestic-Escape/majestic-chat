@@ -1,12 +1,34 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { ChatService } from '../services/ChatService';
-import { ChatError, isChatError } from '@majestic/chat-shared';
+import { ChatError, isChatError, OBJECT_ID_RE, PaginationOptionsSchema, CHAT_CONFIG } from '@majestic/chat-shared';
 import { logger } from '../lib/logger';
 import { cacheGet, cacheSetEx } from '../lib/cache';
-import jwt from 'jsonwebtoken';
+import { verifyWithMainApi } from '../lib/session';
+import { decodeToken } from '../middleware/socketAuth';
 
 const router = Router();
 const chatService = new ChatService();
+
+const isObjectId = (v: unknown): v is string => typeof v === 'string' && OBJECT_ID_RE.test(v);
+
+// Conversation creation is the one REST write; a caller could otherwise mint
+// documents without bound. Per user, per process, one-minute window.
+const createLimit = new Map<string, { count: number; windowStart: number }>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of createLimit) if (now - v.windowStart > 60000) createLimit.delete(k);
+}, 5 * 60 * 1000).unref();
+function allowCreate(userId: string): boolean {
+  const now = Date.now();
+  const cur = createLimit.get(userId);
+  if (!cur || now - cur.windowStart > 60000) {
+    createLimit.set(userId, { count: 1, windowStart: now });
+    return true;
+  }
+  if (cur.count >= CHAT_CONFIG.CONVERSATIONS_PER_MINUTE) return false;
+  cur.count++;
+  return true;
+}
 
 interface AuthRequest extends Request {
   user?: {
@@ -115,8 +137,9 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
   }
 }
 
-// Middleware to verify JWT token
-function verifyToken(req: AuthRequest, res: Response, next: NextFunction): void {
+// Middleware to verify JWT token (signature locally, session freshness via
+// server.me — cached, fail-open; see lib/session)
+async function verifyToken(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -125,15 +148,19 @@ function verifyToken(req: AuthRequest, res: Response, next: NextFunction): void 
     }
 
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { userId: string; firstName: string };
-    
+    const decoded = decodeToken(token);
+    if ((await verifyWithMainApi(token)) === 'rejected') {
+      res.status(401).json({ success: false, message: 'Session expired. Please log in again' });
+      return;
+    }
+
     req.user = {
       id: decoded.userId,
       firstName: decoded.firstName,
     };
     next();
   } catch (error) {
-    logger.error({ error }, 'Token verification failed');
+    logger.warn({ error: error instanceof Error ? error.message : String(error) }, 'Token verification failed');
     res.status(401).json({ success: false, message: 'Invalid token' });
     return;
   }
@@ -170,7 +197,7 @@ router.get('/conversations/check', verifyToken, async (req: AuthRequest, res: Re
     const userId = req.user!.id;
     const { propertyId, hostId, guestId } = req.query;
 
-    if (!propertyId || !hostId || !guestId) {
+    if (!isObjectId(propertyId) || !isObjectId(hostId) || !isObjectId(guestId)) {
       res.status(400).json({
         success: false,
         message: 'Property ID, Host ID, and Guest ID are required',
@@ -219,11 +246,22 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
 
     logger.debug({ propertyId, hostId, guestId, userId }, 'Creating conversation request');
 
-    if (!propertyId || !hostId || !guestId) {
+    // Every id is a Mongo ObjectId (a "participant" that is not a real user id
+    // would be a phantom the requester can never talk to); names are short.
+    if (!isObjectId(propertyId) || !isObjectId(hostId) || !isObjectId(guestId) || (bookingId !== undefined && !isObjectId(bookingId))) {
       res.status(400).json({
         success: false,
         message: 'Property ID, Host ID, and Guest ID are required',
       });
+      return;
+    }
+    if (hostId === guestId) {
+      res.status(400).json({ success: false, message: 'Host and guest must be different users' });
+      return;
+    }
+    const nameOk = (n: unknown) => n === undefined || (typeof n === 'string' && n.length <= 100);
+    if (!nameOk(hostFirstName) || !nameOk(hostLastName) || !nameOk(guestFirstName) || !nameOk(guestLastName)) {
+      res.status(400).json({ success: false, message: 'Invalid participant name' });
       return;
     }
 
@@ -234,6 +272,11 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
         success: false,
         message: 'You are not authorized to create this conversation',
       });
+      return;
+    }
+
+    if (!allowCreate(userId)) {
+      res.status(429).json({ success: false, message: 'Too many conversations created. Try again in a minute.' });
       return;
     }
 
@@ -274,9 +317,13 @@ router.get('/conversations/:id', verifyToken, async (req: AuthRequest, res: Resp
   try {
     const userId = req.user!.id;
     const conversationId = req.params.id;
+    if (!isObjectId(conversationId)) {
+      res.status(400).json({ success: false, message: 'Invalid conversation id' });
+      return;
+    }
 
     const conversation = await chatService.getConversation(conversationId, userId);
-    
+
     res.json({ success: true, data: conversation });
   } catch (error) {
     logger.error({ error }, 'Error fetching conversation');
@@ -293,13 +340,25 @@ router.get('/conversations/:id/messages', verifyToken, async (req: AuthRequest, 
   try {
     const userId = req.user!.id;
     const conversationId = req.params.id;
+    if (!isObjectId(conversationId)) {
+      res.status(400).json({ success: false, message: 'Invalid conversation id' });
+      return;
+    }
+    // Bounded, validated pagination: limit 1..MAX_PAGE_SIZE (a huge or
+    // non-numeric limit used to fetch an unbounded history), cursor an ObjectId.
     const { limit = '50', cursor, direction = 'before' } = req.query;
-
-    const messages = await chatService.getMessages(conversationId, userId, {
-      limit: parseInt(limit as string, 10),
-      cursor: cursor as string | undefined,
-      direction: direction as 'before' | 'after',
+    const parsedLimit = Number.parseInt(String(limit), 10);
+    const paging = PaginationOptionsSchema.safeParse({
+      limit: Number.isFinite(parsedLimit) ? Math.min(parsedLimit, CHAT_CONFIG.MAX_PAGE_SIZE) : NaN,
+      cursor: cursor === undefined ? undefined : String(cursor),
+      direction,
     });
+    if (!paging.success || (paging.data.cursor !== undefined && !isObjectId(paging.data.cursor))) {
+      res.status(400).json({ success: false, message: 'Invalid pagination parameters' });
+      return;
+    }
+
+    const messages = await chatService.getMessages(conversationId, userId, paging.data);
 
     res.json({ success: true, data: messages });
   } catch (error) {

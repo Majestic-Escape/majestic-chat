@@ -62,7 +62,10 @@ export const MessageContentSchema = z.object({
       message: `Message is too long (max ${CHAT_CONFIG.MAX_MESSAGE_LENGTH} characters)`,
     })
     .optional(),
-  attachments: z.array(AttachmentSchema).optional(),
+  // No upload path exists yet, so no client may store attachment metadata
+  // (arbitrary URLs a future client would render). The shape stays for the
+  // day uploads arrive; until then the array must be empty.
+  attachments: z.array(AttachmentSchema).max(0, { message: 'Attachments are not supported yet' }).optional(),
 });
 
 export type MessageContent = z.infer<typeof MessageContentSchema>;

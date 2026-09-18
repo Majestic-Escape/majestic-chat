@@ -6,8 +6,7 @@ import {
   Participant,
   LastMessage,
 } from '@majestic/chat-shared';
-import { getRedisClient } from '../lib/redis';
-import { cacheGet, cacheSetEx } from '../lib/cache';
+import { cacheGet, cacheSetEx, cacheDel } from '../lib/cache';
 import { logger } from '../lib/logger';
 
 // Redis TTLs
@@ -36,32 +35,20 @@ export class ConversationRepository {
    * Invalidate a single conversation cache.
    */
   private async invalidateConv(id: string): Promise<void> {
-    try {
-      const redis = getRedisClient();
-      await redis.del(this.convKey(id));
-    } catch (e) {
-      this.logger.warn({ e, id }, 'Redis invalidation failed (conv)');
-    }
+    await cacheDel(this.convKey(id));
   }
 
   /**
    * Invalidate conversation list cache for specific user(s).
    */
   private async invalidateConvList(...userIds: string[]): Promise<void> {
-    try {
-      const redis = getRedisClient();
-      const keys: string[] = [];
-      for (const userId of userIds) {
-        keys.push(this.convListKey(userId));
-        keys.push(this.convListRoleKey(userId, 'host'));
-        keys.push(this.convListRoleKey(userId, 'guest'));
-      }
-      if (keys.length > 0) {
-        await redis.del(...keys);
-      }
-    } catch (e) {
-      this.logger.warn({ e }, 'Redis invalidation failed (convlist)');
+    const keys: string[] = [];
+    for (const userId of userIds) {
+      keys.push(this.convListKey(userId));
+      keys.push(this.convListRoleKey(userId, 'host'));
+      keys.push(this.convListRoleKey(userId, 'guest'));
     }
+    await cacheDel(...keys);
   }
 
   // ─── CRUD Operations ──────────────────────────────────────────
@@ -291,16 +278,28 @@ export class ConversationRepository {
     }
   }
 
-  async resetUnreadCount(conversationId: string, userId: string): Promise<void> {
+  /**
+   * Zero the reader's unread counter. Returns whether anything changed; only
+   * then are the cached conversation AND the reader's conversation lists
+   * dropped (the lists carry the per-conversation badge — leaving them cached
+   * showed a stale unread badge for up to CONVLIST_TTL after reading).
+   */
+  async resetUnreadCount(conversationId: string, userId: string): Promise<boolean> {
     try {
-      await this.model.findByIdAndUpdate(conversationId, {
-        $set: { [`unreadCount.${userId}`]: 0 },
-      });
+      const field = `unreadCount.${userId}`;
+      const result = await this.model.updateOne(
+        { _id: conversationId, [field]: { $gt: 0 } },
+        { $set: { [field]: 0 } }
+      );
+      const changed = result.modifiedCount > 0;
 
-      this.logger.debug({ conversationId, userId }, 'Unread count reset');
+      this.logger.debug({ conversationId, userId, changed }, 'Unread count reset');
 
-      // Invalidate conversation cache (unreadCount changed)
-      await this.invalidateConv(conversationId);
+      if (changed) {
+        await this.invalidateConv(conversationId);
+        await this.invalidateConvList(userId);
+      }
+      return changed;
     } catch (error) {
       this.logger.error({ error, conversationId, userId }, 'Error resetting unread count');
       throw ChatError.database('Failed to reset unread count');

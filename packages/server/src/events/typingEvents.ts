@@ -1,77 +1,64 @@
-import { SOCKET_EVENTS, getRoomName } from '@majestic/chat-shared';
+import { SOCKET_EVENTS, ConversationRefInputSchema, getRoomName } from '@majestic/chat-shared';
 import { TypedServer, TypedSocket } from '../socket/server';
 import { logger as baseLogger } from '../lib/logger';
+import { lightLimit } from './messageEvents';
 
 /**
- * Emits typing update to all sockets in a room EXCEPT sockets belonging to the typing user.
- * This handles the multi-device scenario where the same user is logged in on multiple devices.
- * Without this, if Host A types on Device 1, Device 2 (also logged in as Host A) would
- * incorrectly show "Typing..." as if the other person is typing.
+ * Typing indicators are best-effort and carry no data, so they are gated by
+ * room membership instead of a lookup: a socket may only signal typing in a
+ * conversation it has joined, and a join is only granted to a participant
+ * (messageEvents). Anything else is dropped — a stranger cannot make "typing…"
+ * appear in a thread they are not part of.
+ *
+ * The update goes to every socket in the room except the typing user's own
+ * sockets (`user:<id>` holds all of a user's connections on every instance),
+ * so a host typing on one device never sees "Typing…" on another. This is a
+ * plain adapter broadcast — no cluster-wide fetchSockets() round trip per
+ * keystroke.
  */
-async function emitTypingToOtherUsers(
-  io: TypedServer,
-  roomName: string,
-  typingUserId: string,
-  conversationId: string,
-  isTyping: boolean
-): Promise<void> {
-  // Get all sockets in the room
-  const socketsInRoom = await io.in(roomName).fetchSockets();
-
-  // Emit only to sockets that belong to OTHER users (not the typing user)
-  for (const s of socketsInRoom) {
-    if (s.data.user?.id !== typingUserId) {
-      s.emit(SOCKET_EVENTS.TYPING_UPDATE, {
-        conversationId,
-        userId: typingUserId,
-        isTyping,
-      });
-    }
-  }
+function emitTyping(io: TypedServer, socket: TypedSocket, conversationId: string, isTyping: boolean): boolean {
+  const roomName = getRoomName(conversationId);
+  if (!socket.data.joinedRooms?.has(roomName)) return false;
+  io.to(roomName)
+    .except(`user:${socket.data.user.id}`)
+    .emit(SOCKET_EVENTS.TYPING_UPDATE, {
+      conversationId,
+      userId: socket.data.user.id,
+      isTyping,
+    });
+  return true;
 }
 
 export function registerTypingEvents(io: TypedServer): void {
   const logger = baseLogger.child({ module: 'typingEvents' });
 
   io.on('connection', (socket: TypedSocket) => {
-    // TYPING:START - User started typing
-    socket.on(SOCKET_EVENTS.TYPING_START, async (data) => {
+    const handle = (isTyping: boolean) => (data: unknown) => {
       const user = socket.data.user;
       if (!user) {
         return;
       }
-
-      try {
-        const { conversationId } = data;
-        const roomName = getRoomName(conversationId);
-
-        // Emit to other users in the room (excludes ALL sockets of the typing user)
-        await emitTypingToOtherUsers(io, roomName, user.id, conversationId, true);
-
-        logger.debug({ userId: user.id, conversationId }, 'User started typing');
-      } catch (error) {
-        logger.error({ error, userId: user.id }, 'Error handling typing start');
+      if (!lightLimit(user.id).allowed) {
+        return;
       }
-    });
+      const parsed = ConversationRefInputSchema.safeParse(data);
+      if (!parsed.success) {
+        return;
+      }
+      try {
+        const sent = emitTyping(io, socket, parsed.data.conversationId, isTyping);
+        if (!sent) {
+          logger.debug({ userId: user.id, conversationId: parsed.data.conversationId }, 'Typing ignored: not in room');
+        }
+      } catch (error) {
+        logger.error({ error, userId: user.id }, 'Error handling typing event');
+      }
+    };
+
+    // TYPING:START - User started typing
+    socket.on(SOCKET_EVENTS.TYPING_START, handle(true));
 
     // TYPING:STOP - User stopped typing
-    socket.on(SOCKET_EVENTS.TYPING_STOP, async (data) => {
-      const user = socket.data.user;
-      if (!user) {
-        return;
-      }
-
-      try {
-        const { conversationId } = data;
-        const roomName = getRoomName(conversationId);
-
-        // Emit to other users in the room (excludes ALL sockets of the typing user)
-        await emitTypingToOtherUsers(io, roomName, user.id, conversationId, false);
-
-        logger.debug({ userId: user.id, conversationId }, 'User stopped typing');
-      } catch (error) {
-        logger.error({ error, userId: user.id }, 'Error handling typing stop');
-      }
-    });
+    socket.on(SOCKET_EVENTS.TYPING_STOP, handle(false));
   });
 }

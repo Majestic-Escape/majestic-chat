@@ -69,7 +69,7 @@ Required:
 Optional:
 - `REDIS_URL` — enables horizontal scaling via Redis adapter; safe to omit locally
 - `CORS_ORIGIN` — comma-separated allow-list. Defaults to `localhost:{3000,3001,3002}` if unset.
-- `MAIN_API_URL` — `server.me` base URL for property/user validation
+- `MAIN_API_URL` — `server.me` base URL for property/user validation **and session freshness**: every socket handshake and REST call asks `POST {MAIN_API_URL}/auth/check-token` once per token (`lib/session.ts`, verdict cached in memory + Redis for 5 min; 401/403/404 = rejected, network/5xx = fail-open for 30 s) and connected sockets are re-checked every 15 min (`socket/server.ts`). Without it, tokens are only signature-checked (logout-all / bans / deleted users are not enforced).
 - `PORT` — defaults to `3001` in code, `3002` in deployed `.env`
 - `LOG_LEVEL` — `debug` | `info` | `warn` | `error`
 
@@ -90,7 +90,7 @@ Pre-migration history: before 2026-05-22, prod chat lived on `nk49u/majestic-cha
 
 Tokens are minted by `server.me` (HS256 with `JWT_SECRET`). This server only **verifies** them — sockets in `middleware/socketAuth.ts`, REST via the inline `verifyToken` in `routes/conversationRoutes.ts` — it never issues them. Never add a login endpoint here.
 
-The verified payload's `userId` becomes the actor for all downstream chat operations. Trust nothing from `socket.handshake.query` beyond the token.
+The verified payload's `userId` becomes the actor for all downstream chat operations (`decodeToken` also requires it to be a 24-hex ObjectId). Trust nothing from `socket.handshake.query` beyond the token. A token that `server.me` reports as invalidated (`tokenVersion` rotated, ban, deleted user) is rejected with `Token invalidated` on connect / 401 on REST, and a live socket is disconnected at the next 15-minute re-check.
 
 ## Common tasks
 
@@ -101,7 +101,16 @@ The verified payload's `userId` becomes the actor for all downstream chat operat
 - **Acks carry an error `code`** (`MessageResponse.code`). Clients treat only deterministic codes (`VALIDATION_ERROR`, `MESSAGE_NOT_FOUND`, `USER_NOT_PARTICIPANT`, `MODERATION_BLOCKED`, `RATE_LIMITED`, …) as "nothing was stored"; anything else (`INTERNAL_ERROR`, timeout, disconnect) is ambiguous and must be retried with the same id.
 - **Reply / quote**: a client may send `replyTo: { messageId }` only. The server resolves it with `MessageRepository.findReplyTarget(conversationId, id)` (same conversation, not deleted — one `MESSAGE_NOT_FOUND` for unknown/foreign/deleted) and stores a `ReplyRef` snapshot `{ messageId, senderId, text (≤ REPLY_SNIPPET_MAX), type }` built by `buildReplyRef` in shared. Never trust quoted text from a client; never nest `replyTo`.
 - **Text cap**: `CHAT_CONFIG.MAX_MESSAGE_LENGTH` (4000) is enforced by the Zod schema on every send.
-- Redis is an **optional** cache (`lib/cache.ts`): reads degrade to Mongo when it is unavailable; never let a Redis failure fail a send.
+- Redis is an **optional** cache (`lib/cache.ts`): reads degrade to Mongo when it is unavailable; never let a Redis failure fail a send. The helpers (`cacheGet/cacheMget/cacheSetEx/cacheDel`) swallow every error, open a 10 s breaker after a failure (no Redis command at all while it is open), and remember keys whose write/invalidation was skipped so they are `DEL`'d the first time Redis answers again — an outage never leaves a stale conversation / unread entry behind. Use them; never call `getRedisClient()` from a service.
+- **Unread totals** (`UnreadCountService.recalculateUnread`) are serialised per user+role — two concurrent sends to the same recipient cannot write an older aggregate last.
+- **Attachments are rejected** (`content.attachments` must be empty) until an upload path exists; legacy rows with attachments still render/quote.
+- **Every socket payload is validated with `safeParse` before any field is read** (ObjectId-shaped ids, `clientMessageId` ≤ 128 chars, `message:read` ≤ 200 ids). Malformed input answers `VALIDATION_ERROR` (ack for `message:send`, `error` event for the rest) and never throws. Catch blocks must not touch the raw payload.
+- **Rate limits are per process** (in-memory): 60 `message:send`/min/user, 300 light events (join/leave/typing/read)/min/user, 20 conversation creations/min/user. With N Railway replicas the effective limit is N× — acceptable for one replica; move the counters to Redis before scaling out.
+- **Existence oracle**: unknown and foreign conversations answer the same `USER_NOT_PARTICIPANT` / 403 on join, send and REST; `message:read` silently ignores ids outside the conversation.
+- **Join / leave are serialised per socket** (`serial()` in `messageEvents.ts`) so room membership follows emission order; `typing:*` is only broadcast for rooms the socket has actually joined and never echoes to the typist's own sockets.
+- **History pagination** is cursor-based on `(createdAt, _id)` (index `{ conversationId, createdAt: -1, _id: -1 }`); the cursor must belong to the conversation; `limit` is clamped to `MAX_PAGE_SIZE` and invalid `limit`/`cursor` answer 400.
+- **`unread:update` carries `conversationId`** (additive) so a client can notice a conversation it has never listed and refresh.
+- **Shutdown** (`lib/shutdown.ts`): SIGTERM/SIGINT close every socket first (clients reconnect to the replacement instance), then Redis and Mongo, with an 8 s hard deadline — do not add work after `io.close()` that can hang.
 
 ### Adding a new socket event
 1. Define the event name + payload schema in `packages/shared/src/types.ts` (or a typed sub-module)
@@ -141,7 +150,8 @@ Two caveats that are easy to get wrong:
 
 ## Testing & deploy
 
-- `npm test` at the workspace root runs the server's Jest suite (`packages/server/src/__tests__`, ts-jest + `mongodb-memory-server` replica set + real `socket.io-client`; no Redis). First run downloads a mongod binary (~65 MB) into `node_modules/.cache`. Build `shared` first (`npm run build:shared`) — the server imports it from `dist`.
+- `npm test` at the workspace root runs the server's Jest suite (`packages/server/src/__tests__`, ts-jest + `mongodb-memory-server` replica set + real `socket.io-client`; no Redis). First run downloads a mongod binary (~65 MB) into `node_modules/.cache`. Build `shared` first (`npm run build:shared`) — the server imports it from `dist`. `messaging.audit.test.ts` covers the hardened contract (payload validation, oracle parity, typing gate, read bounds, pagination, session freshness against a stub main API, the Redis breaker, graceful shutdown); the `reply.*` suites cover send semantics. Jest must exit on its own — close every Redis client (`closeRedisClients()`) and socket a test opens.
+- Real-stack harnesses (not in this repo): `D:/majestic-escape/tests/pw-final/chat-cluster.mjs` (two instances behind the Redis adapter: rooms/isolation, ordering, rate limits, Redis outage, instance restart, load) and the Playwright bodies `chat-system` / `chat-restart` / `chat-reply` / `chat-network` for the site; evidence under `tests/pw-final/evidence/`.
 - `npm run lint` is declared per package but ESLint is not installed yet.
 - Production: deployed to **Railway**, two services (one per environment).
 - Redeploy is required when env vars change (Railway picks them up only on next build).

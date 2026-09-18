@@ -1,4 +1,4 @@
-import { getRedisClient } from '../lib/redis';
+import { cacheGet, cacheMget, cacheSetEx } from '../lib/cache';
 import { ConversationModel } from '@majestic/chat-shared';
 import { logger as baseLogger } from '../lib/logger';
 
@@ -7,6 +7,13 @@ const REDIS_TTL_SECONDS = 300; // 5 minutes
 
 // Singleton instance
 let _instance: UnreadCountService | null = null;
+
+// Recalculations for one user+role run one after another: two sends that
+// commit concurrently each recompute the total, and without ordering the
+// older (smaller) aggregate could be written to Redis last — an under-counting
+// badge until the next event or the TTL. Serialising per key means the last
+// write always reflects the latest commit this process saw.
+const recalcChains = new Map<string, Promise<number>>();
 
 export class UnreadCountService {
   private logger = baseLogger.child({ service: 'UnreadCountService' });
@@ -35,29 +42,23 @@ export class UnreadCountService {
    * Checks Redis first, falls back to MongoDB aggregation.
    */
   async getTotalUnread(userId: string, role: 'host' | 'guest'): Promise<number> {
+    const key = this.getKey(userId, role);
+    // Redis is an optional cache: a miss, an outage or a garbage value all
+    // fall through to the Mongo aggregation (the source of truth).
+    const cached = await cacheGet(key);
+    const parsed = cached === null ? NaN : parseInt(cached, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+
     try {
-      const redis = getRedisClient();
-      const key = this.getKey(userId, role);
-      const cached = await redis.get(key);
-
-      if (cached !== null) {
-        return parseInt(cached, 10);
-      }
-
-      // Cache miss — calculate from MongoDB using aggregation
       const total = await this.aggregateUnreadFromDB(userId, role);
-      await redis.setex(key, REDIS_TTL_SECONDS, total.toString());
-
+      await cacheSetEx(key, REDIS_TTL_SECONDS, total.toString());
       this.logger.debug({ userId, role, total }, 'Unread count calculated from DB and cached');
       return total;
-    } catch (error) {
-      this.logger.error({ error, userId, role }, 'Error getting total unread count, falling back to DB');
-      try {
-        return await this.aggregateUnreadFromDB(userId, role);
-      } catch (dbError) {
-        this.logger.error({ dbError, userId }, 'Error calculating unread from DB');
-        return 0;
-      }
+    } catch (dbError) {
+      this.logger.error({ dbError, userId }, 'Error calculating unread from DB');
+      return 0;
     }
   }
 
@@ -66,42 +67,38 @@ export class UnreadCountService {
    * Minimizes Redis round-trips when the frontend needs both.
    */
   async getBothUnreadCounts(userId: string): Promise<{ host: number; guest: number }> {
-    try {
-      const redis = getRedisClient();
-      const hostKey = this.getKey(userId, 'host');
-      const guestKey = this.getKey(userId, 'guest');
+    const hostKey = this.getKey(userId, 'host');
+    const guestKey = this.getKey(userId, 'guest');
 
-      // Single pipeline for both keys
-      const [hostCached, guestCached] = await redis.mget(hostKey, guestKey);
+    // One MGET for both keys (a miss / outage yields nulls)
+    const [hostCached, guestCached] = await cacheMget([hostKey, guestKey]);
+    const num = (v: string | null): number | null => {
+      const n = v === null ? NaN : parseInt(v, 10);
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    let host = num(hostCached);
+    let guest = num(guestCached);
 
-      let host = hostCached !== null ? parseInt(hostCached, 10) : null;
-      let guest = guestCached !== null ? parseInt(guestCached, 10) : null;
-
-      // Only query DB for missing values
-      if (host === null || guest === null) {
+    // Only query DB for missing values
+    if (host === null || guest === null) {
+      try {
         const dbCounts = await this.aggregateBothFromDB(userId);
-        
         if (host === null) {
           host = dbCounts.host;
-          await redis.setex(hostKey, REDIS_TTL_SECONDS, host.toString());
+          await cacheSetEx(hostKey, REDIS_TTL_SECONDS, host.toString());
         }
         if (guest === null) {
           guest = dbCounts.guest;
-          await redis.setex(guestKey, REDIS_TTL_SECONDS, guest.toString());
+          await cacheSetEx(guestKey, REDIS_TTL_SECONDS, guest.toString());
         }
-
         this.logger.debug({ userId, host, guest }, 'Unread counts fetched (partial cache miss)');
-      }
-
-      return { host: host!, guest: guest! };
-    } catch (error) {
-      this.logger.error({ error, userId }, 'Error getting both unread counts');
-      try {
-        return await this.aggregateBothFromDB(userId);
-      } catch {
-        return { host: 0, guest: 0 };
+      } catch (dbError) {
+        this.logger.error({ dbError, userId }, 'Error calculating both unread counts from DB');
+        return { host: host ?? 0, guest: guest ?? 0 };
       }
     }
+
+    return { host: host!, guest: guest! };
   }
 
   /**
@@ -110,17 +107,24 @@ export class UnreadCountService {
    * Returns the new total.
    */
   async recalculateUnread(userId: string, role: 'host' | 'guest'): Promise<number> {
-    try {
-      const total = await this.aggregateUnreadFromDB(userId, role);
-      const redis = getRedisClient();
-      const key = this.getKey(userId, role);
-      await redis.setex(key, REDIS_TTL_SECONDS, total.toString());
-      this.logger.debug({ userId, role, total }, 'Unread count recalculated and cached');
-      return total;
-    } catch (error) {
-      this.logger.error({ error, userId, role }, 'Error recalculating unread count');
-      return 0;
-    }
+    const key = this.getKey(userId, role);
+    const run = async (): Promise<number> => {
+      try {
+        const total = await this.aggregateUnreadFromDB(userId, role);
+        await cacheSetEx(key, REDIS_TTL_SECONDS, total.toString());
+        this.logger.debug({ userId, role, total }, 'Unread count recalculated and cached');
+        return total;
+      } catch (error) {
+        this.logger.error({ error, userId, role }, 'Error recalculating unread count');
+        return 0;
+      }
+    };
+    const chained = (recalcChains.get(key) ?? Promise.resolve(0)).then(run, run);
+    recalcChains.set(key, chained);
+    chained.finally(() => {
+      if (recalcChains.get(key) === chained) recalcChains.delete(key);
+    });
+    return chained;
   }
 
   /**

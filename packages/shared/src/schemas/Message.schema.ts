@@ -120,7 +120,11 @@ const MessageSchema = new Schema<IMessageDocument>(
 );
 
 // Indexes
-MessageSchema.index({ conversationId: 1, createdAt: -1 }); // Message loading
+// Message loading + cursor pagination: sorted by (createdAt, _id) so ties in
+// createdAt have a deterministic order the index can serve without a blocking
+// sort. (The older { conversationId, createdAt } index remains on existing
+// deployments until dropped by hand; it is a strict prefix of this one.)
+MessageSchema.index({ conversationId: 1, createdAt: -1, _id: -1 }); // Message loading
 MessageSchema.index({ conversationId: 1, clientMessageId: 1 }, { unique: true }); // Idempotency
 MessageSchema.index({ senderId: 1, createdAt: -1 }); // User history
 MessageSchema.index({ 'moderation.status': 1, createdAt: -1 }); // Moderation queue

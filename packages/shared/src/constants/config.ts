@@ -13,9 +13,17 @@ export const CHAT_CONFIG = {
   // Connection recovery - allow 2 minutes for reconnection
   CONNECTION_RECOVERY_DURATION: 120000,
 
-  // Rate limits
+  // Rate limits (per user, per minute, per process)
   MESSAGES_PER_MINUTE: 60,
+  // Cheap events still touch Redis/Mongo (join → conversation lookup) or fan
+  // out to a room (read, typing); a generous cap stops a flood from one user.
+  LIGHT_EVENTS_PER_MINUTE: 300,
+  CONVERSATIONS_PER_MINUTE: 20,
   UPLOADS_PER_HOUR: 30,
+
+  // Wire bounds
+  MAX_CLIENT_MESSAGE_ID_LENGTH: 128,
+  MAX_READ_BATCH: 200,
 
   // Message text limits (UTF-16 code units). MAX_MESSAGE_LENGTH is enforced on
   // every send; REPLY_SNIPPET_MAX bounds the snapshot stored on a reply.

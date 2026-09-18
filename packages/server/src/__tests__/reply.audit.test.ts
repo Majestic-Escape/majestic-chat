@@ -263,7 +263,7 @@ describe('resource hygiene', () => {
 });
 
 describe('burst / concurrency', () => {
-  const BURST_HOST = 'dddddddddddddddddddddd4';
+  const BURST_HOST = 'ddddddddddddddddddddddd4';
   const BURST_GUEST = 'eeeeeeeeeeeeeeeeeeeeeee5';
 
   it('30 parallel sends (distinct ids, 10 of them replies) → 30 documents, 30 success acks, receiver gets each once', async () => {
