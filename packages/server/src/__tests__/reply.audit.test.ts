@@ -261,3 +261,50 @@ describe('resource hygiene', () => {
     for (const s of serverSockets) expect(s.listenerCount(SOCKET_EVENTS.MESSAGE_SEND)).toBe(1);
   });
 });
+
+describe('burst / concurrency', () => {
+  const BURST_HOST = 'dddddddddddddddddddddd4';
+  const BURST_GUEST = 'eeeeeeeeeeeeeeeeeeeeeee5';
+
+  it('30 parallel sends (distinct ids, 10 of them replies) → 30 documents, 30 success acks, receiver gets each once', async () => {
+    const conv = await makeConversation({ hostId: BURST_HOST, guestId: BURST_GUEST });
+    const guest = await connect(BURST_GUEST);
+    const host = await connect(BURST_HOST);
+    await join(guest, conv);
+    await join(host, conv);
+    const seen = collect(host);
+    const original = (await send(guest, plain(conv, 'original'))) as Ack;
+    expect(original.success).toBe(true);
+    const payloads = Array.from({ length: 30 }, (_, i) =>
+      plain(conv, `burst ${i}`, i % 3 === 0 ? { replyTo: { messageId: original.messageId } } : {})
+    );
+    const acks = (await Promise.all(payloads.map((p) => send(guest, p, 8000)))) as Ack[];
+    expect(acks.every((a) => a.success)).toBe(true);
+    expect(new Set(acks.map((a) => a.messageId)).size).toBe(30);
+    expect(await countMessages({ conversationId: conv })).toBe(31);
+    await waitUntil(() => seen.length >= 31, 5000);
+    const ids = seen.map((m) => m.message.id);
+    expect(new Set(ids).size).toBe(31); // each message exactly once on the receiver
+    const replies = seen.filter((m) => m.message.replyTo);
+    expect(replies.length).toBe(10);
+    for (const r of replies) expect(r.message.replyTo).toMatchObject({ messageId: original.messageId, senderId: BURST_GUEST, text: 'original', type: 'text' });
+    // conversation state applied exactly once per message
+    const c = (await rawConversation(conv))!;
+    expect(c.unreadCount[BURST_HOST]).toBe(31);
+    expect(c.lastMessage.senderId).toBe(BURST_GUEST);
+    // no listener growth on the server sockets
+    for (const s of io.sockets.sockets.values()) expect(s.listenerCount(SOCKET_EVENTS.MESSAGE_SEND)).toBe(1);
+  });
+
+  it('same clientMessageId emitted 10× in parallel from two sockets of one user → one document, every ack carries the same id', async () => {
+    const conv = await makeConversation({ hostId: BURST_HOST, guestId: BURST_GUEST });
+    const a = await connect(BURST_GUEST);
+    const b = await connect(BURST_GUEST);
+    const shared = plain(conv, 'race');
+    const acks = (await Promise.all([...Array(5)].flatMap(() => [send(a, shared, 8000), send(b, shared, 8000)]))) as Ack[];
+    expect(acks.every((x) => x.success)).toBe(true);
+    expect(new Set(acks.map((x) => x.messageId)).size).toBe(1);
+    expect(await countMessages({ conversationId: conv })).toBe(1);
+    expect((await rawConversation(conv))!.unreadCount[BURST_HOST]).toBe(1);
+  });
+});
