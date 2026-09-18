@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CHAT_CONFIG } from '../constants/config';
 
 // Enums
 export enum MessageType {
@@ -55,7 +56,12 @@ export type Attachment = z.infer<typeof AttachmentSchema>;
 
 // MessageContent
 export const MessageContentSchema = z.object({
-  text: z.string().optional(),
+  text: z
+    .string()
+    .max(CHAT_CONFIG.MAX_MESSAGE_LENGTH, {
+      message: `Message is too long (max ${CHAT_CONFIG.MAX_MESSAGE_LENGTH} characters)`,
+    })
+    .optional(),
   attachments: z.array(AttachmentSchema).optional(),
 });
 
@@ -99,6 +105,28 @@ export const LastMessageSchema = z.object({
 
 export type LastMessage = z.infer<typeof LastMessageSchema>;
 
+// Reply / quote.
+// ReplyToInput is all a client may send: the id of a message in the same
+// conversation. ReplyRef is the server-derived snapshot stored on the reply
+// (author + truncated text) so history renders without a second lookup and
+// the quoted text can never be forged by a client.
+export const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+
+export const ReplyToInputSchema = z.object({
+  messageId: z.string().regex(OBJECT_ID_RE, { message: 'Invalid reply target' }),
+});
+
+export type ReplyToInput = z.infer<typeof ReplyToInputSchema>;
+
+export const ReplyRefSchema = z.object({
+  messageId: z.string().regex(OBJECT_ID_RE),
+  senderId: z.string(),
+  text: z.string().max(CHAT_CONFIG.REPLY_SNIPPET_MAX),
+  type: MessageTypeSchema,
+});
+
+export type ReplyRef = z.infer<typeof ReplyRefSchema>;
+
 // Message
 export const MessageSchema = z.object({
   id: z.string(),
@@ -113,6 +141,7 @@ export const MessageSchema = z.object({
   createdAt: z.coerce.date(),
   updatedAt: z.coerce.date(),
   deletedAt: z.coerce.date().optional(),
+  replyTo: ReplyRefSchema.optional(),
 });
 
 export type Message = z.infer<typeof MessageSchema>;
@@ -139,6 +168,7 @@ export const SendMessageParamsSchema = z.object({
   content: MessageContentSchema,
   type: MessageTypeSchema,
   clientMessageId: z.string(),
+  replyTo: ReplyToInputSchema.optional(),
 });
 
 export type SendMessageParams = z.infer<typeof SendMessageParamsSchema>;

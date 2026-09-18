@@ -7,6 +7,7 @@ import {
   LastMessage,
 } from '@majestic/chat-shared';
 import { getRedisClient } from '../lib/redis';
+import { cacheGet, cacheSetEx } from '../lib/cache';
 import { logger } from '../lib/logger';
 
 // Redis TTLs
@@ -96,9 +97,8 @@ export class ConversationRepository {
    */
   async findById(id: string): Promise<Conversation | null> {
     try {
-      // 1. Check Redis cache
-      const redis = getRedisClient();
-      const cached = await redis.get(this.convKey(id));
+      // 1. Check Redis cache (optional — a miss when Redis is unavailable)
+      const cached = await cacheGet(this.convKey(id));
       if (cached) {
         return JSON.parse(cached);
       }
@@ -110,7 +110,7 @@ export class ConversationRepository {
       const result = this.transformDocument(conversation);
 
       // 3. Cache for next time
-      await redis.setex(this.convKey(id), CONV_TTL, JSON.stringify(result));
+      await cacheSetEx(this.convKey(id), CONV_TTL, JSON.stringify(result));
 
       return result;
     } catch (error) {
@@ -160,10 +160,9 @@ export class ConversationRepository {
    */
   async findByUserId(userId: string, limit: number = 50): Promise<Conversation[]> {
     try {
-      // 1. Check Redis cache
-      const redis = getRedisClient();
+      // 1. Check Redis cache (optional)
       const cacheKey = this.convListKey(userId);
-      const cached = await redis.get(cacheKey);
+      const cached = await cacheGet(cacheKey);
       if (cached) {
         return JSON.parse(cached);
       }
@@ -178,7 +177,7 @@ export class ConversationRepository {
       const result = conversations.map((conv) => this.transformDocument(conv));
 
       // 3. Cache for next time
-      await redis.setex(cacheKey, CONVLIST_TTL, JSON.stringify(result));
+      await cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));
 
       return result;
     } catch (error) {
@@ -195,10 +194,9 @@ export class ConversationRepository {
    */
   async findByUserIdAndRole(userId: string, role: 'host' | 'guest', limit: number = 50): Promise<Conversation[]> {
     try {
-      // 1. Check Redis cache
-      const redis = getRedisClient();
+      // 1. Check Redis cache (optional)
       const cacheKey = this.convListRoleKey(userId, role);
-      const cached = await redis.get(cacheKey);
+      const cached = await cacheGet(cacheKey);
       if (cached) {
         return JSON.parse(cached);
       }
@@ -215,7 +213,7 @@ export class ConversationRepository {
       const result = conversations.map((conv) => this.transformDocument(conv));
 
       // 3. Cache for next time
-      await redis.setex(cacheKey, CONVLIST_TTL, JSON.stringify(result));
+      await cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));
 
       return result;
     } catch (error) {
@@ -236,6 +234,15 @@ export class ConversationRepository {
   }
 
   // ─── Write Operations (with cache invalidation) ──────────────
+
+  /**
+   * Drop the Redis copies of a conversation and its participants' lists after
+   * the document changed elsewhere (e.g. inside a message transaction).
+   */
+  async invalidateAfterMessage(conversationId: string, participantUserIds: string[]): Promise<void> {
+    await this.invalidateConv(conversationId);
+    if (participantUserIds.length > 0) await this.invalidateConvList(...participantUserIds);
+  }
 
   async updateLastMessage(conversationId: string, lastMessage: LastMessage, participantUserIds?: string[]): Promise<void> {
     try {

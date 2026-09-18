@@ -19,7 +19,7 @@ export interface UseChatReturn {
   isLoading: boolean;
   error: string | null;
   hasMore: boolean;
-  sendMessage: (text: string, clientMessageId?: string) => Promise<void>;
+  sendMessage: (text: string, clientMessageId?: string, replyTo?: { messageId: string }) => Promise<void>;
   loadMore: () => Promise<void>;
   markAsRead: (messageIds: string[]) => void;
   typingUsers: Set<string>;
@@ -167,7 +167,7 @@ export function useChat({ conversationId, apiUrl, onNewMessage, onMessageRead }:
   }, [client, conversationId, onNewMessage, onMessageRead]);
 
   const sendMessage = useCallback(
-    async (text: string, clientMessageId?: string) => {
+    async (text: string, clientMessageId?: string, replyTo?: { messageId: string }) => {
       try {
         setError(null);
         const messageData: SendMessageInput = {
@@ -175,6 +175,7 @@ export function useChat({ conversationId, apiUrl, onNewMessage, onMessageRead }:
           content: { text },
           type: MessageType.TEXT,
           clientMessageId: clientMessageId || `${Date.now()}-${Math.random()}`,
+          ...(replyTo ? { replyTo } : {}),
         };
 
         await client.sendMessage(messageData);

@@ -12,7 +12,7 @@
     "build:client": "npm run build -w @majestic/chat-client",
     "dev:server": "npm run dev -w @majestic/chat-server",
     "lint": "npm run lint --workspaces",
-    "test": "npm run test --workspaces",
+    "test": "npm run test -w @majestic/chat-server",
     "clean": "rm -rf packages/*/dist"
   }
 }

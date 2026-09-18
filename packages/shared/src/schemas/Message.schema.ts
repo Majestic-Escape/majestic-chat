@@ -5,6 +5,7 @@ import {
   MessageStatus,
   ModerationStatus,
 } from '../types/chat.types';
+import { CHAT_CONFIG } from '../constants/config';
 
 export interface IMessageDocument extends Omit<Message, 'id'>, Document {
   _id: mongoose.Types.ObjectId;
@@ -84,6 +85,14 @@ const MessageSchema = new Schema<IMessageDocument>(
     },
     deletedAt: {
       type: Date,
+    },
+    // Server-derived snapshot of the quoted message (see ReplyRefSchema).
+    // Nested path, not a sub-schema: no _id, absent on plain messages.
+    replyTo: {
+      messageId: { type: String },
+      senderId: { type: String },
+      text: { type: String, maxlength: CHAT_CONFIG.REPLY_SNIPPET_MAX },
+      type: { type: String, enum: Object.values(MessageType) },
     },
   },
   {

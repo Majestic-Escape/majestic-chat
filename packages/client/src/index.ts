@@ -31,5 +31,7 @@ export type {
   LastMessage,
   PaginationOptions,
   PaginatedResult,
+  ReplyRef,
+  ReplyToInput,
 } from '@majestic/chat-shared';
 

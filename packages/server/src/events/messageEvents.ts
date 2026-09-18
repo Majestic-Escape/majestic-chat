@@ -3,6 +3,7 @@ import {
   SendMessageInputSchema,
   ReadMessagesInputSchema,
   ChatError,
+  ErrorCode,
   getRoomName,
   MessageType,
   CHAT_CONFIG,
@@ -15,7 +16,8 @@ import { logger as baseLogger } from '../lib/logger';
 // Rate limiting state - tracks message counts per user
 const rateLimitMap = new Map<string, { count: number; windowStart: number }>();
 
-// Clean up old rate limit entries every 5 minutes
+// Clean up old rate limit entries every 5 minutes. unref(): the timer must not
+// keep a process (or a Jest worker) alive on its own.
 setInterval(() => {
   const now = Date.now();
   for (const [userId, data] of rateLimitMap.entries()) {
@@ -23,7 +25,7 @@ setInterval(() => {
       rateLimitMap.delete(userId);
     }
   }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref();
 
 function checkRateLimit(userId: string): { allowed: boolean; retryAfter?: number } {
   const now = Date.now();
@@ -69,23 +71,47 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
           code: error.code,
           message: error.message,
         });
-        callback?.({ success: false, error: `Rate limit exceeded. Try again in ${rateCheck.retryAfter} seconds.` });
+        callback?.({
+          success: false,
+          code: error.code,
+          error: `Rate limit exceeded. Try again in ${rateCheck.retryAfter} seconds.`,
+        });
         return;
       }
 
       try {
-        logger.debug({ userId: user.id, conversationId: data.conversationId }, 'Sending message');
+        logger.debug({ userId: user.id, conversationId: data?.conversationId }, 'Sending message');
 
-        // Validate input
-        const validated = SendMessageInputSchema.parse(data);
+        // Validate input. A malformed payload is a definitive rejection
+        // (nothing stored): ack a human reason + VALIDATION_ERROR, no broadcast.
+        const parsed = SendMessageInputSchema.safeParse(data);
+        if (!parsed.success) {
+          const issue = parsed.error.issues[0];
+          const reason =
+            issue?.path[0] === 'content' && issue.path[1] === 'text' && issue.code === 'too_big'
+              ? `Message is too long (max ${CHAT_CONFIG.MAX_MESSAGE_LENGTH} characters)`
+              : issue?.path[0] === 'replyTo'
+                ? 'Invalid reply target'
+                : 'Invalid message';
+          logger.warn({ userId: user.id, issue }, 'Rejected message payload');
+          callback?.({ success: false, code: ErrorCode.VALIDATION_ERROR, error: reason });
+          return;
+        }
+        const validated = parsed.data;
 
-        // Send message via service
-        const { message, recipientInfo } = await chatService.sendMessage({
+        // Send message via service. `created: false` means this
+        // clientMessageId was already stored (retry after a lost ack, buffered
+        // re-emit, concurrent duplicate): nothing changed in the DB, but we
+        // still broadcast — delivery is at-least-once and clients de-duplicate
+        // by message id / clientMessageId, so a crash between commit and
+        // broadcast is healed by the sender's retry.
+        const { message, recipientInfo, created } = await chatService.sendMessage({
           conversationId: validated.conversationId,
           senderId: user.id,
           content: validated.content,
           type: validated.type || MessageType.TEXT,
           clientMessageId: validated.clientMessageId,
+          replyTo: validated.replyTo,
         });
 
         // Emit to conversation room
@@ -115,7 +141,7 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
         // Send acknowledgment
         callback?.({ success: true, messageId: message.id });
 
-        logger.info({ messageId: message.id, userId: user.id }, 'Message sent');
+        logger.info({ messageId: message.id, userId: user.id, created }, created ? 'Message sent' : 'Message re-acknowledged (idempotent)');
       } catch (error) {
         logger.error({ error, userId: user.id }, 'Error sending message');
 
@@ -124,9 +150,11 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
             code: error.code,
             message: error.message,
           });
-          callback?.({ success: false, error: error.message });
+          callback?.({ success: false, code: error.code, error: error.message });
         } else {
-          callback?.({ success: false, error: 'Failed to send message' });
+          // Unknown failure: the client must treat this as ambiguous (the
+          // message may or may not have been stored) and retry the same id.
+          callback?.({ success: false, code: ErrorCode.INTERNAL_ERROR, error: 'Failed to send message' });
         }
       }
     });

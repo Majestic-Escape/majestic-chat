@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { ChatService } from '../services/ChatService';
 import { ChatError, isChatError } from '@majestic/chat-shared';
 import { logger } from '../lib/logger';
-import { getRedisClient } from '../lib/redis';
+import { cacheGet, cacheSetEx } from '../lib/cache';
 import jwt from 'jsonwebtoken';
 
 const router = Router();
@@ -40,10 +40,9 @@ interface PropertyApiResponse {
 // Redis-cached: key prophost:{propertyId}, TTL: 1 hour
 async function validatePropertyHost(propertyId: string, hostId: string): Promise<PropertyValidationResult> {
   try {
-    // 1. Check Redis cache for resolved hostId
-    const redis = getRedisClient();
+    // 1. Check Redis cache for resolved hostId (optional cache)
     const cacheKey = `prophost:${propertyId}`;
-    const cachedHostId = await redis.get(cacheKey);
+    const cachedHostId = await cacheGet(cacheKey);
     
     if (cachedHostId) {
       const isValid = String(cachedHostId) === String(hostId);
@@ -97,7 +96,7 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
     }
 
     // 3. Cache the resolved hostId for 1 hour
-    await redis.setex(cacheKey, 3600, String(propertyHostId));
+    await cacheSetEx(cacheKey, 3600, String(propertyHostId));
 
     if (String(propertyHostId) !== String(hostId)) {
       logger.warn({ propertyId, propertyHostId, providedHostId: hostId }, 'Host ID mismatch');

@@ -11,6 +11,8 @@ import {
   ModerationStatus,
   ParticipantRole,
   ConversationStatus,
+  ReplyRef,
+  buildReplyRef,
 } from '@majestic/chat-shared';
 import { MessageRepository } from '../repositories/MessageRepository';
 import { ConversationRepository } from '../repositories/ConversationRepository';
@@ -38,7 +40,30 @@ export class ChatService {
     return this.eventEmitter;
   }
 
-  async sendMessage(params: SendMessageParams): Promise<{ message: Message; recipientInfo: Array<{ userId: string; role: string }> }> {
+  /**
+   * The message a reply quotes: must exist in THIS conversation and not be
+   * deleted. One generic MESSAGE_NOT_FOUND for unknown / foreign / deleted ids
+   * (no existence oracle across conversations). The stored snapshot is built
+   * here from the persisted original — never from anything a client sent.
+   */
+  private async resolveReplyTo(conversationId: string, messageId: string): Promise<ReplyRef> {
+    const original = await this.messageRepo.findReplyTarget(conversationId, messageId);
+    if (!original) {
+      throw ChatError.notFound('message');
+    }
+    return buildReplyRef(original);
+  }
+
+  /**
+   * Send a message. Idempotent on (conversationId, clientMessageId):
+   *  - `created: true`  → inserted now, conversation lastMessage/unread applied
+   *    atomically with it (one transaction), Redis recomputed;
+   *  - `created: false` → the same logical send was already stored (retry after
+   *    a lost ack, concurrent duplicate, buffered re-emit); nothing in the DB is
+   *    touched. `recipientInfo` is still filled so the caller re-broadcasts —
+   *    delivery to the other party is at-least-once and clients de-duplicate.
+   */
+  async sendMessage(params: SendMessageParams): Promise<{ message: Message; recipientInfo: Array<{ userId: string; role: string }>; created: boolean }> {
     try {
       // Validate params
       const validated = SendMessageParamsSchema.parse(params);
@@ -56,15 +81,25 @@ export class ChatService {
         throw ChatError.userNotParticipant();
       }
 
-      // Check for duplicate (idempotency)
+      const recipients = conversation.participants
+        .filter(p => p.userId !== validated.senderId)
+        .map(p => ({ userId: p.userId, role: p.role as string }));
+
+      // Check for duplicate (idempotency) — cheap fast path; the unique index
+      // inside createWithConversationUpdate is the real guarantee.
       const existing = await this.messageRepo.findByClientMessageId(
         validated.conversationId,
         validated.clientMessageId
       );
       if (existing) {
         this.logger.debug({ messageId: existing.id }, 'Returning existing message (idempotent)');
-        return { message: existing, recipientInfo: [] };
+        return { message: existing, recipientInfo: recipients, created: false };
       }
+
+      // Resolve the quoted message before any write (structural check, 404)
+      const replyTo = validated.replyTo
+        ? await this.resolveReplyTo(validated.conversationId, validated.replyTo.messageId)
+        : undefined;
 
       // Run moderation check
       const moderationResult = await this.moderationService.checkMessage(validated.content);
@@ -78,48 +113,53 @@ export class ChatService {
         throw ChatError.moderationBlocked(moderationResult.flags);
       }
 
-      // Create message
-      const message = await this.messageRepo.create({
-        conversationId: validated.conversationId,
-        senderId: validated.senderId,
-        clientMessageId: validated.clientMessageId,
-        type: validated.type,
-        content: validated.content,
-        moderation: moderationResult,
-        readBy: [{ userId: validated.senderId, readAt: new Date() }],
-        status: MessageStatus.SENT,
-      });
-
-      // Update conversation lastMessage (pass participant IDs to avoid extra DB query)
-      const participantUserIds = conversation.participants.map(p => p.userId);
-      await this.conversationRepo.updateLastMessage(validated.conversationId, {
-        content: validated.content.text || '[Attachment]',
-        senderId: validated.senderId,
-        sentAt: message.createdAt,
-      }, participantUserIds);
-
-      // Increment unread count for other participants (MongoDB + Redis)
-      const recipientInfo: Array<{ userId: string; role: string }> = [];
-      for (const participant of conversation.participants) {
-        if (participant.userId !== validated.senderId) {
-          await this.conversationRepo.incrementUnreadCount(
-            validated.conversationId,
-            participant.userId
-          );
-          // Directly recalculate and cache — avoids invalidate+get round-trip
-          await this.unreadCountService.recalculateUnread(
-            participant.userId,
-            participant.role as 'host' | 'guest'
-          );
-          recipientInfo.push({ userId: participant.userId, role: participant.role as string });
+      // Insert the message and update the conversation (lastMessage + unread)
+      // in one transaction — both or neither, whatever crashes afterwards.
+      // A plain message carries no replyTo key at all.
+      const { message, created } = await this.messageRepo.createWithConversationUpdate(
+        {
+          conversationId: validated.conversationId,
+          senderId: validated.senderId,
+          clientMessageId: validated.clientMessageId,
+          type: validated.type,
+          content: validated.content,
+          moderation: moderationResult,
+          readBy: [{ userId: validated.senderId, readAt: new Date() }],
+          status: MessageStatus.SENT,
+          ...(replyTo ? { replyTo } : {}),
+        },
+        {
+          lastMessage: {
+            content: validated.content.text || '[Attachment]',
+            senderId: validated.senderId,
+          },
+          recipientIds: recipients.map(r => r.userId),
         }
+      );
+
+      if (!created) {
+        // Lost the race to a concurrent identical send: same outcome as the
+        // fast path above — nothing else to apply.
+        this.logger.debug({ messageId: message.id }, 'Returning existing message (idempotent, raced)');
+        return { message, recipientInfo: recipients, created: false };
+      }
+
+      // Redis: drop the cached conversation/lists and recompute unread totals
+      // (idempotent recomputes from Mongo, outside the transaction)
+      const participantUserIds = conversation.participants.map(p => p.userId);
+      await this.conversationRepo.invalidateAfterMessage(validated.conversationId, participantUserIds);
+      for (const recipient of recipients) {
+        await this.unreadCountService.recalculateUnread(
+          recipient.userId,
+          recipient.role as 'host' | 'guest'
+        );
       }
 
       // Emit event
       this.eventEmitter.emit('message:created', { message, conversation });
 
       this.logger.info({ messageId: message.id }, 'Message sent successfully');
-      return { message, recipientInfo };
+      return { message, recipientInfo: recipients, created: true };
     } catch (error) {
       this.logger.error({ error }, 'Error sending message');
       throw error;

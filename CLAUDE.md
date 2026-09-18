@@ -88,11 +88,20 @@ Pre-migration history: before 2026-05-22, prod chat lived on `nk49u/majestic-cha
 
 ## Auth model
 
-Tokens are minted by `server.me` (HS256 with `JWT_SECRET`). This server only **verifies** them in `middleware/socketAuth.ts` and `middleware/auth.ts` — it never issues them. Never add a login endpoint here.
+Tokens are minted by `server.me` (HS256 with `JWT_SECRET`). This server only **verifies** them — sockets in `middleware/socketAuth.ts`, REST via the inline `verifyToken` in `routes/conversationRoutes.ts` — it never issues them. Never add a login endpoint here.
 
 The verified payload's `userId` becomes the actor for all downstream chat operations. Trust nothing from `socket.handshake.query` beyond the token.
 
 ## Common tasks
+
+### Message send semantics (read before touching `sendMessage`)
+
+- **Idempotent on `(conversationId, clientMessageId)`** — unique index. A retry of a logical send **reuses the same `clientMessageId`**; the server answers `created: false`, touches no DB state, and still re-broadcasts `message:new` (delivery is *at-least-once*; every client de-duplicates by message id / `clientMessageId`).
+- **The insert and the conversation update (`lastMessage`, per-recipient unread `$inc`) run in one Mongo transaction** (`MessageRepository.createWithConversationUpdate`) — both or neither, so a crash between commit and broadcast is healed by the client's same-id retry. Needs a replica set (every Atlas tier; tests use `MongoMemoryReplSet`).
+- **Acks carry an error `code`** (`MessageResponse.code`). Clients treat only deterministic codes (`VALIDATION_ERROR`, `MESSAGE_NOT_FOUND`, `USER_NOT_PARTICIPANT`, `MODERATION_BLOCKED`, `RATE_LIMITED`, …) as "nothing was stored"; anything else (`INTERNAL_ERROR`, timeout, disconnect) is ambiguous and must be retried with the same id.
+- **Reply / quote**: a client may send `replyTo: { messageId }` only. The server resolves it with `MessageRepository.findReplyTarget(conversationId, id)` (same conversation, not deleted — one `MESSAGE_NOT_FOUND` for unknown/foreign/deleted) and stores a `ReplyRef` snapshot `{ messageId, senderId, text (≤ REPLY_SNIPPET_MAX), type }` built by `buildReplyRef` in shared. Never trust quoted text from a client; never nest `replyTo`.
+- **Text cap**: `CHAT_CONFIG.MAX_MESSAGE_LENGTH` (4000) is enforced by the Zod schema on every send.
+- Redis is an **optional** cache (`lib/cache.ts`): reads degrade to Mongo when it is unavailable; never let a Redis failure fail a send.
 
 ### Adding a new socket event
 1. Define the event name + payload schema in `packages/shared/src/types.ts` (or a typed sub-module)
@@ -132,7 +141,8 @@ Two caveats that are easy to get wrong:
 
 ## Testing & deploy
 
-- `npm run lint` (ESLint) and `npm run test` (Jest) at workspace root run across all packages.
+- `npm test` at the workspace root runs the server's Jest suite (`packages/server/src/__tests__`, ts-jest + `mongodb-memory-server` replica set + real `socket.io-client`; no Redis). First run downloads a mongod binary (~65 MB) into `node_modules/.cache`. Build `shared` first (`npm run build:shared`) — the server imports it from `dist`.
+- `npm run lint` is declared per package but ESLint is not installed yet.
 - Production: deployed to **Railway**, two services (one per environment).
 - Redeploy is required when env vars change (Railway picks them up only on next build).
 

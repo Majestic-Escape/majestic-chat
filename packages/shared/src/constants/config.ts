@@ -17,6 +17,11 @@ export const CHAT_CONFIG = {
   MESSAGES_PER_MINUTE: 60,
   UPLOADS_PER_HOUR: 30,
 
+  // Message text limits (UTF-16 code units). MAX_MESSAGE_LENGTH is enforced on
+  // every send; REPLY_SNIPPET_MAX bounds the snapshot stored on a reply.
+  MAX_MESSAGE_LENGTH: 4000,
+  REPLY_SNIPPET_MAX: 280,
+
   // File limits
   MAX_FILE_SIZE: 25 * 1024 * 1024, // 25MB
   ALLOWED_IMAGE_TYPES: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Message, MessageContentSchema, MessageTypeSchema } from "./chat.types";
+import { Message, MessageContentSchema, MessageTypeSchema, ReplyToInputSchema } from "./chat.types";
 
 // Input types
 export const SendMessageInputSchema = z.object({
@@ -7,6 +7,8 @@ export const SendMessageInputSchema = z.object({
   content: MessageContentSchema,
   type: MessageTypeSchema,
   clientMessageId: z.string(),
+  // Only the id: the quoted text/author are resolved server-side (see ReplyRef)
+  replyTo: ReplyToInputSchema.optional(),
 });
 
 export type SendMessageInput = z.infer<typeof SendMessageInputSchema>;
@@ -22,6 +24,11 @@ export const MessageResponseSchema = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
   error: z.string().optional(),
+  // ChatError code on failure (VALIDATION_ERROR, MESSAGE_NOT_FOUND, RATE_LIMITED,
+  // INTERNAL_ERROR, ...). Lets a client tell a definitive rejection ("nothing
+  // was stored") from an ambiguous failure it must retry with the same
+  // clientMessageId.
+  code: z.string().optional(),
 });
 
 export type MessageResponse = z.infer<typeof MessageResponseSchema>;
