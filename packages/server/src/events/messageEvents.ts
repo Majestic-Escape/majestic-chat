@@ -12,7 +12,7 @@ import {
 import { TypedServer, TypedSocket } from '../socket/server';
 import { ChatService } from '../services/ChatService';
 import { UnreadCountService } from '../services/UnreadCountService';
-import { logger as baseLogger } from '../lib/logger';
+import { logger as baseLogger, logFailure } from '../lib/logger';
 
 // Rate limiting state, per user and per process. Two budgets: message sends
 // (the expensive path) and the light events (join / leave / read / typing),
@@ -159,7 +159,7 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
               conversationId: validated.conversationId,
             });
           } catch (err) {
-            logger.error({ err, recipientId: recipient.userId }, 'Error emitting unread count update');
+            logFailure(logger, err, { recipientId: recipient.userId }, 'Error emitting unread count update');
           }
         }
 
@@ -168,7 +168,7 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
 
         logger.info({ messageId: message.id, userId: user.id, created }, created ? 'Message sent' : 'Message re-acknowledged (idempotent)');
       } catch (error) {
-        logger.error({ error, userId: user.id }, 'Error sending message');
+        logFailure(logger, error, { userId: user.id }, 'Message rejected or failed');
 
         if (error instanceof ChatError) {
           emitError(socket, error.code, error.message);
@@ -230,7 +230,7 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
           'Messages marked as read'
         );
       } catch (error) {
-        logger.error({ error, userId: user.id, conversationId: validated.conversationId }, 'Error marking messages as read');
+        logFailure(logger, error, { userId: user.id, conversationId: validated.conversationId }, 'Read receipt rejected or failed');
 
         if (error instanceof ChatError) {
           emitError(socket, error.code, error.message);
@@ -278,7 +278,7 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
 
         logger.info({ userId: user.id, conversationId, roomName }, 'Joined conversation room');
       } catch (error) {
-        logger.error({ error, userId: user.id, conversationId }, 'Error joining conversation');
+        logFailure(logger, error, { userId: user.id, conversationId }, 'Conversation join rejected or failed');
 
         if (error instanceof ChatError) {
           emitError(socket, error.code, error.message);
@@ -315,7 +315,7 @@ export function registerMessageEvents(io: TypedServer, chatService: ChatService)
 
         logger.info({ userId: user.id, conversationId, roomName }, 'Left conversation room');
       } catch (error) {
-        logger.error({ error, userId: user.id, conversationId }, 'Error leaving conversation');
+        logFailure(logger, error, { userId: user.id, conversationId }, 'Conversation leave failed');
       }
       });
     });

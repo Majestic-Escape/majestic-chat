@@ -18,7 +18,7 @@ import { MessageRepository } from '../repositories/MessageRepository';
 import { ConversationRepository } from '../repositories/ConversationRepository';
 import { ModerationService } from './ModerationService';
 import { UnreadCountService } from './UnreadCountService';
-import { logger } from '../lib/logger';
+import { logger, logFailure } from '../lib/logger';
 
 export class ChatService {
   private messageRepo: MessageRepository;
@@ -158,7 +158,7 @@ export class ChatService {
       this.logger.info({ messageId: message.id }, 'Message sent successfully');
       return { message, recipientInfo: recipients, created: true };
     } catch (error) {
-      this.logger.error({ error }, 'Error sending message');
+      logFailure(this.logger, error, {}, 'Error sending message', 'debug');
       throw error;
     }
   }
@@ -185,7 +185,7 @@ export class ChatService {
 
       return result;
     } catch (error) {
-      this.logger.error({ error, conversationId }, 'Error fetching messages');
+      logFailure(this.logger, error, { conversationId }, 'Error fetching messages', 'debug');
       throw error;
     }
   }
@@ -218,7 +218,7 @@ export class ChatService {
       this.logger.debug({ conversationId, userId, role: userRole, count: messageIds.length, newTotal }, 'Messages marked as read');
       return { newTotal, role: userRole };
     } catch (error) {
-      this.logger.error({ error, conversationId, userId }, 'Error marking messages as read');
+      logFailure(this.logger, error, { conversationId, userId }, 'Error marking messages as read', 'debug');
       throw error;
     }
   }
@@ -231,7 +231,7 @@ export class ChatService {
 
       return conversations;
     } catch (error) {
-      this.logger.error({ error, userId }, 'Error fetching conversations');
+      logFailure(this.logger, error, { userId }, 'Error fetching conversations', 'debug');
       throw error;
     }
   }
@@ -244,7 +244,7 @@ export class ChatService {
 
       return conversations;
     } catch (error) {
-      this.logger.error({ error, userId, role }, 'Error fetching conversations by role');
+      logFailure(this.logger, error, { userId, role }, 'Error fetching conversations by role', 'debug');
       throw error;
     }
   }
@@ -293,7 +293,7 @@ export class ChatService {
 
       return conversation;
     } catch (error) {
-      this.logger.error({ error, propertyId, hostId, guestId }, 'Error getting/creating conversation');
+      logFailure(this.logger, error, { propertyId, hostId, guestId }, 'Error getting/creating conversation', 'debug');
       throw error;
     }
   }
@@ -310,7 +310,7 @@ export class ChatService {
 
       return conversation;
     } catch (error) {
-      this.logger.error({ error, conversationId, userId }, 'Error fetching conversation');
+      logFailure(this.logger, error, { conversationId, userId }, 'Error fetching conversation', 'debug');
       throw error;
     }
   }
@@ -329,7 +329,7 @@ export class ChatService {
       
       return existing;
     } catch (error) {
-      this.logger.error({ error, propertyId, hostId, guestId }, 'Error checking conversation exists');
+      logFailure(this.logger, error, { propertyId, hostId, guestId }, 'Error checking conversation exists', 'debug');
       throw error;
     }
   }
