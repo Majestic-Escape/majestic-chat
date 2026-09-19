@@ -67,6 +67,7 @@ const MessageSchema = new Schema<IMessageDocument>(
         min: 0,
         max: 1,
       },
+      version: { type: Number },
       originalContent: {
         type: String,
       },

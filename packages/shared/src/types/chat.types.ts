@@ -76,7 +76,13 @@ export const ModerationResultSchema = z.object({
   flags: z.array(z.string()),
   confidence: z.number().min(0).max(1),
   originalContent: z.string().optional(),
+  // Detector generation that accepted the message. Rows without version 2
+  // predate the contact lock-down and are masked (history-aware) on read.
+  version: z.number().int().optional(),
 });
+
+/** Detector generation stored on every message accepted since the contact lock-down. */
+export const MODERATION_VERSION = 2;
 
 export type ModerationResult = z.infer<typeof ModerationResultSchema>;
 
@@ -89,11 +95,13 @@ export const ReadReceiptSchema = z.object({
 export type ReadReceipt = z.infer<typeof ReadReceiptSchema>;
 
 // Participant
+// A participant is identified to the other party by first name only; the
+// `lastName` field still exists on legacy documents and is never returned
+// (ConversationRepository.toPublicParticipant) nor written any more.
 export const ParticipantSchema = z.object({
   userId: z.string(),
   role: ParticipantRoleSchema,
   firstName: z.string().optional(),
-  lastName: z.string().optional(),
   joinedAt: z.coerce.date(),
 });
 
@@ -104,6 +112,8 @@ export const LastMessageSchema = z.object({
   content: z.string(),
   senderId: z.string(),
   sentAt: z.coerce.date(),
+  /** MODERATION_VERSION of the message this preview came from; absent = legacy, masked on read. */
+  version: z.number().int().optional(),
 });
 
 export type LastMessage = z.infer<typeof LastMessageSchema>;
