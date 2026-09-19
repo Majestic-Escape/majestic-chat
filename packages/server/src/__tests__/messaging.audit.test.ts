@@ -14,6 +14,7 @@ import { socketAuthMiddleware } from '../middleware/socketAuth';
 import { registerMessageEvents } from '../events/messageEvents';
 import { registerTypingEvents } from '../events/typingEvents';
 import { ChatService } from '../services/ChatService';
+import { UnreadCountService } from '../services/UnreadCountService';
 import { conversationRoutes } from '../routes/conversationRoutes';
 import { resetSessionCache } from '../lib/session';
 import { createShutdown } from '../lib/shutdown';
@@ -268,17 +269,31 @@ describe('rooms, typing and read', () => {
     expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
     expect((await readBy(secondAck.messageId as string)).some((r) => r.userId === GUEST_ID)).toBe(false);
     expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(1);
+    // a receipt is not a conversation update: lists sort by updatedAt, so the
+    // thread being read must not jump to the top of either participant's list
+    const updatedAtBefore = (await rawConversation(conv))!.updatedAt;
     // legacy drift (a counter zeroed by the old unconditional reset while a message was unread) heals on the next receipt
-    await ConversationModel.updateOne({ _id: conv }, { $set: { [`unreadCount.${GUEST_ID}`]: 0 } });
+    await ConversationModel.updateOne({ _id: conv }, { $set: { [`unreadCount.${GUEST_ID}`]: 0 } }, { timestamps: false });
     guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [first.messageId as string] }); // already read: nothing new to mark
     await waitUntil(() => unreadPushes.length >= 4);
     expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
     expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(1);
-    // reading the second one brings it to 0
-    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    expect((await rawConversation(conv))!.updatedAt).toEqual(updatedAtBefore);
+    // an already-applied receipt changes nothing: the counter stays, updatedAt stays, and the
+    // role total is served from the cache instead of being invalidated and recounted
+    const recounts = jest.spyOn(UnreadCountService.prototype, 'recalculateUnread');
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [first.messageId as string] });
     await waitUntil(() => unreadPushes.length >= 5);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    expect((await rawConversation(conv))!.updatedAt).toEqual(updatedAtBefore);
+    expect(recounts).not.toHaveBeenCalled();
+    recounts.mockRestore();
+    // reading the second one brings it to 0 (still without touching updatedAt)
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    await waitUntil(() => unreadPushes.length >= 6);
     expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(0);
     expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(0);
+    expect((await rawConversation(conv))!.updatedAt).toEqual(updatedAtBefore);
   });
 
   it("a conversation whose unread map has no entry for a user counts 0 for them — never the other participant's counter (legacy documents)", async () => {

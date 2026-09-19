@@ -299,19 +299,29 @@ export class ConversationRepository {
    * counter that older code had zeroed too early heals on the next receipt.
    * Returns true when the stored value changed (only then are the caches
    * invalidated and the role total recounted).
+   *
+   * `timestamps: false`: a read is not a conversation update. Conversation
+   * lists sort by `updatedAt`, so the automatic timestamp would move the
+   * thread being read to the top of both participants' lists, and it made
+   * every receipt count as modified (caches dropped and the total recounted
+   * for a receipt that changed nothing).
    */
   async applyReadToUnreadCount(conversationId: string, userId: string, newlyRead: number, truth: number): Promise<boolean> {
     try {
       const field = `unreadCount.${userId}`;
-      const result = await this.model.updateOne({ _id: conversationId }, [
-        {
-          $set: {
-            [field]: {
-              $max: [{ $subtract: [{ $ifNull: [`$${field}`, 0] }, newlyRead] }, truth, 0],
+      const result = await this.model.updateOne(
+        { _id: conversationId },
+        [
+          {
+            $set: {
+              [field]: {
+                $max: [{ $subtract: [{ $ifNull: [`$${field}`, 0] }, newlyRead] }, truth, 0],
+              },
             },
           },
-        },
-      ]);
+        ],
+        { timestamps: false }
+      );
       const changed = result.modifiedCount > 0;
 
       this.logger.debug({ conversationId, userId, newlyRead, truth, changed }, 'Unread count updated by read receipt');
