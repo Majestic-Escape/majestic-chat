@@ -300,15 +300,42 @@ export class ConversationRepository {
    * Returns true when the stored value changed (only then are the caches
    * invalidated and the role total recounted).
    *
+   * A counter that sits ABOVE the truth (a decrement that failed half-way, a
+   * counted message that no longer counts) would never come down through a
+   * relative update, so when `seen` — the raw counter read just before the
+   * truth was counted — shows such drift, the counter is compared-and-set to
+   * the truth: the filter matches only if nothing moved the counter since
+   * `seen` was read, which is exactly when the truth is exact. If a
+   * concurrent send did move it, the CAS matches nothing and the relative
+   * update below runs instead, so a message that landed in the window is
+   * never lost; the drift heals on the next quiet receipt.
+   *
    * `timestamps: false`: a read is not a conversation update. Conversation
    * lists sort by `updatedAt`, so the automatic timestamp would move the
    * thread being read to the top of both participants' lists, and it made
    * every receipt count as modified (caches dropped and the total recounted
    * for a receipt that changed nothing).
    */
-  async applyReadToUnreadCount(conversationId: string, userId: string, newlyRead: number, truth: number): Promise<boolean> {
+  async applyReadToUnreadCount(conversationId: string, userId: string, newlyRead: number, truth: number, seen?: number): Promise<boolean> {
     try {
       const field = `unreadCount.${userId}`;
+      if (seen !== undefined && seen - newlyRead > truth) {
+        const cas = await this.model.updateOne(
+          { _id: conversationId, [field]: seen },
+          { $set: { [field]: truth } },
+          { timestamps: false }
+        );
+        if (cas.matchedCount > 0) {
+          const converged = cas.modifiedCount > 0;
+          this.logger.debug({ conversationId, userId, seen, newlyRead, truth, converged }, 'Unread count converged to the readBy truth');
+          if (converged) {
+            await this.invalidateConv(conversationId);
+            await this.invalidateConvList(userId);
+          }
+          return converged;
+        }
+        // the counter moved while the truth was being counted: fall through to the relative update
+      }
       const result = await this.model.updateOne(
         { _id: conversationId },
         [
@@ -334,6 +361,19 @@ export class ConversationRepository {
     } catch (error) {
       this.logger.error({ error, conversationId, userId }, 'Error resetting unread count');
       throw ChatError.database('Failed to reset unread count');
+    }
+  }
+
+  /** The stored unread counter for a participant, read from MongoDB (never the cache). */
+  async readUnreadCounter(conversationId: string, userId: string): Promise<number> {
+    try {
+      const field = `unreadCount.${userId}`;
+      const doc = await this.model.findOne({ _id: conversationId }, { [field]: 1 }).lean<{ unreadCount?: Record<string, number> }>();
+      const value = doc?.unreadCount?.[userId];
+      return typeof value === 'number' ? value : 0;
+    } catch (error) {
+      this.logger.error({ error, conversationId, userId }, 'Error reading unread counter');
+      throw ChatError.database('Failed to read unread counter');
     }
   }
 

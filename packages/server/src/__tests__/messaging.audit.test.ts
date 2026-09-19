@@ -294,6 +294,30 @@ describe('rooms, typing and read', () => {
     expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(0);
     expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(0);
     expect((await rawConversation(conv))!.updatedAt).toEqual(updatedAtBefore);
+    // drift ABOVE the truth (a decrement that failed half-way) comes down on the next receipt,
+    // even one that marks nothing new — the badge must not show phantom unread for good
+    await ConversationModel.updateOne({ _id: conv }, { $set: { [`unreadCount.${GUEST_ID}`]: 5 } }, { timestamps: false });
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    await waitUntil(() => unreadPushes.length >= 7);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(0);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(0);
+    expect((await rawConversation(conv))!.updatedAt).toEqual(updatedAtBefore);
+    // ...and a message that lands while such a receipt is in flight is still not lost
+    await ConversationModel.updateOne({ _id: conv }, { $set: { [`unreadCount.${GUEST_ID}`]: 5 } }, { timestamps: false });
+    const third = send(host, plain(conv, 'third, racing a converging receipt'));
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    const thirdAck = (await third) as Ack;
+    await waitUntil(() => unreadPushes.length >= 9);
+    await sleep(150);
+    // the racing message is never lost: either the receipt converged (1) or the send moved the
+    // counter under it and the receipt fell back to the relative update (6, drift kept)…
+    expect([1, 6]).toContain((await rawConversation(conv))!.unreadCount[GUEST_ID]);
+    expect((await readBy(thirdAck.messageId as string)).some((r) => r.userId === GUEST_ID)).toBe(false);
+    // …and the next quiet receipt converges for good
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    await waitUntil(() => unreadPushes.length >= 10);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(1);
   });
 
   it("a conversation whose unread map has no entry for a user counts 0 for them — never the other participant's counter (legacy documents)", async () => {

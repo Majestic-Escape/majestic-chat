@@ -203,14 +203,18 @@ export class ChatService {
         ? await this.messageRepo.updateReadBy(conversationId, messageIds, userId, new Date())
         : 0;
 
-      // The counter moves by what this receipt marked read and is raised to
+      // The counter moves by what this receipt marked read and converges to
       // the readBy truth — a message that arrived while the receipt was in
-      // flight stays counted (an unconditional reset to 0 used to lose it).
-      // Only a change invalidates the cached conversation + the reader's
-      // lists (the list carries per-conversation unread badges) and forces a
-      // recount; re-reading an already-read thread changes nothing.
+      // flight stays counted (an unconditional reset to 0 used to lose it),
+      // and a counter that drifted above the truth comes down (see
+      // ConversationRepository.applyReadToUnreadCount; `seen` is read before
+      // the truth is counted so the repository can tell drift from a
+      // concurrent send). Only a change invalidates the cached conversation +
+      // the reader's lists (the list carries per-conversation unread badges)
+      // and forces a recount; re-reading an already-read thread changes nothing.
+      const seen = await this.conversationRepo.readUnreadCounter(conversationId, userId);
       const truth = await this.messageRepo.countUnreadFor(conversationId, userId);
-      const changed = await this.conversationRepo.applyReadToUnreadCount(conversationId, userId, newlyRead, truth);
+      const changed = await this.conversationRepo.applyReadToUnreadCount(conversationId, userId, newlyRead, truth, seen);
       const newTotal = changed
         ? await this.unreadCountService.recalculateUnread(userId, userRole)
         : await this.unreadCountService.getTotalUnread(userId, userRole);
