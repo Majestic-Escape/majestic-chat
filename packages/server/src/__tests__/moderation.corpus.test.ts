@@ -24,16 +24,18 @@ import {
   ModerationStatus,
 } from '@majestic/chat-shared';
 
-export const CONTACT_VECTORS_SHA256 = 'cc0592d07482f9864851e672907dc8e9af0723e7eb89c300afac074de9f8fd1e';
+export const CONTACT_VECTORS_SHA256 = '08baefec1d0162ca8410333e28dff6c2641c5dac51579cd867031bfe3cfdbdc3';
 
 const fixturePath = path.resolve(__dirname, '../../../shared/src/moderation/__fixtures__/contact-vectors.json');
-const raw = fs.readFileSync(fixturePath);
-const corpus = JSON.parse(raw.toString('utf8')) as {
+// Hashed with normalised line endings so a checkout under core.autocrlf=true
+// (CRLF working copy) pins the same corpus as the LF one in the index.
+const raw = fs.readFileSync(fixturePath).toString('utf8').replace(/\r\n/g, '\n');
+const corpus = JSON.parse(raw) as {
   version: number;
   vectors: Array<{ id: string; text: string; expected: string; kinds: string[]; masked: string }>;
   sequences: Array<{ id: string; messages: string[]; blockedAt: number[]; statuses: string[]; masked: string[] }>;
   fields: Array<{ id: string; fields: Record<string, string>; expected: string; masked: Record<string, string> }>;
-  address: { address: Record<string, string>; tokens: { numbers: string[]; grams: string[] }; cases: Array<{ id: string; text: string; expected: string; masked: string }> };
+  addresses: Array<{ address: Record<string, string>; tokens: { numbers: string[]; grams: string[] }; cases: Array<{ id: string; text: string; expected: string; masked: string }> }>;
   names: Array<{ name: string; ok: boolean }>;
 };
 
@@ -76,10 +78,10 @@ describe('contact-information golden corpus', () => {
     expect(Object.fromEntries(keys.map((k, i) => [k, masked[i]]))).toEqual(f.masked);
   });
 
-  it('address tokens and disclosure cases', () => {
-    const tokens = buildAddressTokens(corpus.address.address);
-    expect(tokens).toEqual(corpus.address.tokens);
-    for (const c of corpus.address.cases) {
+  it.each(corpus.addresses.map((a, i) => [i, a]))('address block %s: tokens and disclosure cases', (_i, block) => {
+    const tokens = buildAddressTokens(block.address);
+    expect(tokens).toEqual(block.tokens);
+    for (const c of block.cases) {
       expect(detectContact(c.text, { address: tokens }).status).toBe(c.expected);
       expect(maskContactInfo(c.text, { address: tokens })).toBe(c.masked);
     }

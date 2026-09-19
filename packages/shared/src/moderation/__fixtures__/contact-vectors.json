@@ -1158,13 +1158,12 @@
         "dot com"
       ],
       "blockedAt": [
-        1,
-        2
+        1
       ],
       "statuses": [
         "clean",
         "blocked",
-        "blocked"
+        "clean"
       ],
       "masked": [
         "rahul@",
@@ -1573,62 +1572,139 @@
       }
     }
   ],
-  "address": {
-    "address": {
-      "street": "House No 72, Holiday Street, Near Baga Beach",
-      "line1": "Plot 12/B",
-      "city": "Calangute",
-      "district": "North Goa",
-      "state": "Goa"
+  "addresses": [
+    {
+      "address": {
+        "street": "House No 72, Holiday Street, Near Baga Beach",
+        "line1": "Plot 12/B",
+        "city": "Calangute",
+        "district": "North Goa",
+        "state": "Goa"
+      },
+      "tokens": {
+        "numbers": [
+          "72",
+          "12/b"
+        ],
+        "grams": [
+          "holiday street"
+        ]
+      },
+      "cases": [
+        {
+          "id": "addr-house-street",
+          "text": "My villa is at House 72, Holiday Street",
+          "expected": "blocked",
+          "masked": "My villa is at House •••, •••"
+        },
+        {
+          "id": "addr-street-plot",
+          "text": "we are on holiday street, plot 12/b",
+          "expected": "blocked",
+          "masked": "we are on •••, plot •••"
+        },
+        {
+          "id": "addr-locality",
+          "text": "near Calangute beach, north goa",
+          "expected": "clean",
+          "masked": "near Calangute beach, north goa"
+        },
+        {
+          "id": "addr-street-only",
+          "text": "holiday street is quiet",
+          "expected": "clean",
+          "masked": "holiday street is quiet"
+        },
+        {
+          "id": "addr-number-only",
+          "text": "72 is my lucky number",
+          "expected": "clean",
+          "masked": "72 is my lucky number"
+        },
+        {
+          "id": "addr-landmark",
+          "text": "villa 72 near baga beach",
+          "expected": "clean",
+          "masked": "villa 72 near baga beach"
+        }
+      ]
     },
-    "cases": [
-      {
-        "id": "addr-house-street",
-        "text": "My villa is at House 72, Holiday Street",
-        "expected": "blocked",
-        "masked": "My villa is at House •••, •••"
+    {
+      "address": {
+        "street": "House 9, Palm Lane",
+        "city": "Anjuna",
+        "state": "Goa"
       },
-      {
-        "id": "addr-street-plot",
-        "text": "we are on holiday street, plot 12/b",
-        "expected": "blocked",
-        "masked": "we are on •••, plot •••"
+      "tokens": {
+        "numbers": [
+          "house 9"
+        ],
+        "grams": [
+          "palm lane"
+        ]
       },
-      {
-        "id": "addr-locality",
-        "text": "near Calangute beach, north goa",
-        "expected": "clean",
-        "masked": "near Calangute beach, north goa"
+      "cases": [
+        {
+          "id": "addr1-house-digit",
+          "text": "We are at House 9, Palm Lane, come straight in",
+          "expected": "blocked",
+          "masked": "We are at •••, •••, come straight in"
+        },
+        {
+          "id": "addr1-digit-elsewhere",
+          "text": "we are on palm lane, arriving at 9",
+          "expected": "clean",
+          "masked": "we are on palm lane, arriving at 9"
+        },
+        {
+          "id": "addr1-no-street",
+          "text": "house 9 is ours",
+          "expected": "clean",
+          "masked": "house 9 is ours"
+        },
+        {
+          "id": "addr1-locality",
+          "text": "a quiet lane in Anjuna, 5 minutes from the beach",
+          "expected": "clean",
+          "masked": "a quiet lane in Anjuna, 5 minutes from the beach"
+        }
+      ]
+    },
+    {
+      "address": {
+        "street": "Main Road",
+        "line1": "Sunshinevilla",
+        "city": "Vagator",
+        "state": "Goa"
       },
-      {
-        "id": "addr-street-only",
-        "text": "holiday street is quiet",
-        "expected": "clean",
-        "masked": "holiday street is quiet"
+      "tokens": {
+        "numbers": [],
+        "grams": [
+          "sunshinevilla"
+        ]
       },
-      {
-        "id": "addr-number-only",
-        "text": "72 is my lucky number",
-        "expected": "clean",
-        "masked": "72 is my lucky number"
-      },
-      {
-        "id": "addr-landmark",
-        "text": "villa 72 near baga beach",
-        "expected": "clean",
-        "masked": "villa 72 near baga beach"
-      }
-    ],
-    "tokens": {
-      "numbers": [
-        "72",
-        "12/b"
-      ],
-      "grams": [
-        "holiday street"
+      "cases": [
+        {
+          "id": "addr2-generic-street",
+          "text": "we are on the main road",
+          "expected": "clean",
+          "masked": "we are on the main road"
+        },
+        {
+          "id": "addr2-distinct-word",
+          "text": "look for sunshinevilla and house 3",
+          "expected": "clean",
+          "masked": "look for sunshinevilla and house 3"
+        },
+        {
+          "id": "addr2-distinct-word-twice",
+          "text": "sunshinevilla on main road, ask for sunshinevilla",
+          "expected": "blocked",
+          "masked": "••• on main road, ask for •••"
+        }
       ]
     }
-  },
+  ],
   "names": [
     {
       "name": "Rahul",

@@ -210,12 +210,13 @@ function rewriteTokens(pieces: Piece[]): Piece[] {
     const t = tokens[k].text;
     if (t !== 'at' && t !== 'dot') continue;
     const bracketed = isBracketed(pieces, tokens[k]);
+    // A joiner only replaces separators: the gap on both sides must be
+    // whitespace / punctuation, so "rahul@" + "dot com" stays two fragments
+    // (no domain in sight) instead of collapsing into "rahul.com".
+    const gapsClean = gapIsSmall(pieces, tokens[k - 1], tokens[k], 3) && gapIsSmall(pieces, tokens[k], tokens[k + 1], 3);
+    if (!gapsClean) continue;
     if (t === 'dot') {
-      if (bracketed || gapIsSmall(pieces, tokens[k - 1], tokens[k], 1) || gapIsSmall(pieces, tokens[k], tokens[k + 1], 1)) {
-        joiner.set(k, '.');
-      } else if (looksLikeDomainSuffix(tokens, k + 1) && gapIsSmall(pieces, tokens[k - 1], tokens[k], 3)) {
-        joiner.set(k, '.');
-      }
+      joiner.set(k, '.');
     } else if (t === 'at') {
       const next = tokens[k + 1]?.text || '';
       const nextNext = tokens[k + 2]?.text || '';
@@ -280,11 +281,6 @@ function isBracketed(pieces: Piece[], t: Token): boolean {
 
 function hasDotAfter(pieces: Piece[], t: Token): boolean {
   return t.end < pieces.length && pieces[t.end].s === '.' && t.end + 1 < pieces.length && WORD_CHAR.test(pieces[t.end + 1].s);
-}
-
-function looksLikeDomainSuffix(tokens: Token[], k: number): boolean {
-  const t = tokens[k]?.text;
-  return !!t && isValidTld(t);
 }
 
 export function normalizeForModeration(original: string): NormalizedText {
@@ -386,6 +382,8 @@ const GENERIC_ADDRESS_WORDS = new Set(
 const STREET_TYPE_WORDS = new Set('road rd lane ln street st nagar marg path gali chowk colony society enclave vihar layout extension extn complex tower wing block villa apartment apt building bldg estate garden park circle square cross avenue ave drive dr close court ct place pl heights hills hill view vista residency residence retreat farm farms cottage cottages homestay resort beach'.split(' '));
 // Everything after a landmark preposition describes the surroundings, not the address.
 const LANDMARK_PREPOSITIONS = new Set(['near', 'opposite', 'opp', 'behind', 'next', 'beside', 'close', 'adjacent', 'nearby', 'facing', 'off']);
+// A one-digit house number counts only together with the word that introduces it.
+const HOUSE_NUMBER_WORDS = new Set(['house', 'plot', 'flat', 'no', 'number', 'h', 'door', 'villa', 'bungalow', 'unit', 'shop', 'gate', 'block']);
 
 /** Build the tokens of an exact address that must not be disclosed in public text. */
 export function buildAddressTokens(addr: { street?: string; line1?: string; line2?: string; city?: string; district?: string; state?: string } | null | undefined): AddressTokens {
@@ -408,15 +406,24 @@ export function buildAddressTokens(addr: { street?: string; line1?: string; line
     const kinds: Array<'d' | 't' | ''> = []; // distinctive / street-type / break
     const seen: string[] = [];
     let landmark = false;
+    let prevWord = '';
     for (const w of words) {
       if (LANDMARK_PREPOSITIONS.has(w)) landmark = true;
       if (/\d/.test(w)) {
-        // "72", "72/b", "h-12", "1203": a house/plot/flat number with at least two characters
-        if (!landmark && w.length >= 2 && !/^\d{6}$/.test(w) /* pincode */ && !/^(?:19|20)\d{2}$/.test(w) /* a year */) numbers.add(w);
+        // "72", "72/b", "h-12", "1203": a house/plot/flat number with at least
+        // two characters, or a single digit right after a house/plot word
+        // ("house 9") — matched in text only with such a word in front.
+        const single = w.length === 1;
+        if (!landmark && !/^\d{6}$/.test(w) /* pincode */ && !/^(?:19|20)\d{2}$/.test(w) /* a year */) {
+          if (!single) numbers.add(w);
+          else if (HOUSE_NUMBER_WORDS.has(prevWord)) numbers.add(`${prevWord} ${w}`);
+        }
         kinds.push('');
         seen.push(w);
+        prevWord = w;
         continue;
       }
+      prevWord = w;
       if (landmark || w.length < 3 || locality.has(w)) {
         kinds.push('');
         seen.push(w);
@@ -452,7 +459,7 @@ function detectAddress(norm: NormalizedText, tokensOpt: AddressTokens | AddressT
     }
     const numberHits: Array<[number, number]> = [];
     for (const n of tokens.numbers) {
-      const re = new RegExp(`(?<![a-z0-9])${escapeRegExp(n)}(?![a-z0-9])`, 'g');
+      const re = new RegExp(`(?<![a-z0-9])${escapeRegExp(n).replace(/ /g, '[\\s.,#:-]{0,3}')}(?![a-z0-9])`, 'g');
       let m: RegExpExecArray | null;
       while ((m = re.exec(text))) numberHits.push([m.index, m.index + m[0].length]);
     }
