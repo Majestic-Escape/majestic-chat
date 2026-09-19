@@ -420,7 +420,14 @@ describe('REST', () => {
     // main API stub answers 200 without a host field → validation allows (documented fail-open)
     expect((await rest('/conversations', token(GUEST_ID), { method: 'POST', body: body({ guestId: 'nope' }) })).status).toBe(400);
     expect((await rest('/conversations', token(GUEST_ID), { method: 'POST', body: body({ hostId: GUEST_ID }) })).status).toBe(400);
-    expect((await rest('/conversations', token(GUEST_ID), { method: 'POST', body: body({ guestFirstName: 'x'.repeat(101) }) })).status).toBe(400);
+    // Client-supplied participant names are ignored since the contact lock-down (never stored, never echoed)
+    const forged = await rest('/conversations', token(GUEST_ID), { method: 'POST', body: body({ guestFirstName: 'Rahul 9876543210', guestLastName: 'Sharma', hostLastName: 'Verma' }) });
+    expect(forged.status).toBe(200);
+    const forgedBody = (await forged.json()) as { data: { participants: Array<Record<string, unknown>> } };
+    for (const p of forgedBody.data.participants) {
+      expect(p).not.toHaveProperty('lastName');
+      expect(JSON.stringify(p)).not.toMatch(/9876543210|Sharma|Verma/);
+    }
     expect((await rest('/conversations', token(STRANGER_ID), { method: 'POST', body: body({}) })).status).toBe(403);
     let limited = 0;
     for (let i = 0; i < CHAT_CONFIG.CONVERSATIONS_PER_MINUTE + 5; i++) {

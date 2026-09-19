@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { ChatService } from '../services/ChatService';
-import { ChatError, isChatError, OBJECT_ID_RE, PaginationOptionsSchema, CHAT_CONFIG } from '@majestic/chat-shared';
+import { ChatError, isChatError, OBJECT_ID_RE, PaginationOptionsSchema, CHAT_CONFIG, isAcceptableName } from '@majestic/chat-shared';
 import { logger, logFailure } from '../lib/logger';
 import { cacheGet, cacheSetEx } from '../lib/cache';
 import { verifyWithMainApi } from '../lib/session';
@@ -35,27 +35,70 @@ interface AuthRequest extends Request {
     id: string;
     firstName: string;
   };
+  /** The caller's bearer token, forwarded to server.me for the guest-name lookup. */
+  token?: string;
 }
 
 // Property host validation result
 interface PropertyValidationResult {
   valid: boolean;
   message?: string;
+  /** The host's public first name as server.me publishes it (never client-supplied). */
+  hostFirstName?: string;
 }
+
+type HostRef = { _id?: string; id?: string; firstName?: string } | string;
 
 // Property API response structure
 interface PropertyApiResponse {
   success?: boolean;
   data?: {
-    host?: { _id?: string; id?: string } | string;
+    host?: HostRef;
     hostId?: string;
   };
   property?: {
-    host?: { _id?: string; id?: string } | string;
+    host?: HostRef;
     hostId?: string;
   };
-  host?: { _id?: string; id?: string } | string;
+  host?: HostRef;
   hostId?: string;
+}
+
+/** A cached `prophost:` entry: the host id and (since the contact lock-down) the first name. */
+interface CachedPropertyHost {
+  hostId: string;
+  firstName?: string;
+}
+
+function acceptableFirstName(name: unknown): string | undefined {
+  return isAcceptableName(name) ? (name as string).trim() : undefined;
+}
+
+/**
+ * The guest's public first name from server.me (`GET /guests/info/:id`, any
+ * authenticated user may read the public fields of another). Called with the
+ * requester's own token; any failure just leaves the name unset (the UI
+ * falls back to "Guest").
+ */
+async function fetchUserFirstName(userId: string, token: string | undefined): Promise<string | undefined> {
+  if (!token) return undefined;
+  const apiBaseUrl = process.env.MAIN_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5005/api/v1';
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${apiBaseUrl}/guests/info/${userId}`, {
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as { user?: { firstName?: string } };
+    return acceptableFirstName(body?.user?.firstName);
+  } catch (error) {
+    logger.warn({ userId, error: error instanceof Error ? error.message : String(error) }, 'Guest name lookup failed - name omitted');
+    return undefined;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // Validate that the hostId matches the property's actual host
@@ -64,15 +107,23 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
   try {
     // 1. Check Redis cache for resolved hostId (optional cache)
     const cacheKey = `prophost:${propertyId}`;
-    const cachedHostId = await cacheGet(cacheKey);
-    
-    if (cachedHostId) {
-      const isValid = String(cachedHostId) === String(hostId);
+    const cachedRaw = await cacheGet(cacheKey);
+
+    if (cachedRaw) {
+      // Entries written before the contact lock-down hold the bare host id.
+      let cached: CachedPropertyHost;
+      try {
+        const parsed = JSON.parse(cachedRaw);
+        cached = parsed && typeof parsed === 'object' ? parsed : { hostId: String(cachedRaw) };
+      } catch {
+        cached = { hostId: String(cachedRaw) };
+      }
+      const isValid = String(cached.hostId) === String(hostId);
       if (!isValid) {
-        logger.warn({ propertyId, cachedHostId, providedHostId: hostId }, 'Host ID mismatch (cached)');
+        logger.warn({ propertyId, cachedHostId: cached.hostId, providedHostId: hostId }, 'Host ID mismatch (cached)');
         return { valid: false, message: 'Host ID does not match property owner' };
       }
-      return { valid: true };
+      return { valid: true, hostFirstName: acceptableFirstName(cached.firstName) };
     }
 
     // 2. Cache miss — fetch from API
@@ -104,21 +155,24 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
     const property = data.data || data.property || data;
 
     let propertyHostId: string | undefined;
+    let hostFirstName: string | undefined;
     if (typeof property.host === 'object' && property.host !== null) {
       propertyHostId = property.host._id || property.host.id;
+      hostFirstName = acceptableFirstName(property.host.firstName);
     } else if (typeof property.host === 'string') {
       propertyHostId = property.host;
     } else {
       propertyHostId = property.hostId;
     }
-    
+
     if (!propertyHostId) {
       logger.warn({ propertyId }, 'Property has no host field - allowing request');
       return { valid: true };
     }
 
-    // 3. Cache the resolved hostId for 1 hour
-    await cacheSetEx(cacheKey, 3600, String(propertyHostId));
+    // 3. Cache the resolved host (id + public first name) for 1 hour
+    const entry: CachedPropertyHost = { hostId: String(propertyHostId), ...(hostFirstName ? { firstName: hostFirstName } : {}) };
+    await cacheSetEx(cacheKey, 3600, JSON.stringify(entry));
 
     if (String(propertyHostId) !== String(hostId)) {
       logger.warn({ propertyId, propertyHostId, providedHostId: hostId }, 'Host ID mismatch');
@@ -126,7 +180,7 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
     }
 
     logger.debug({ propertyId, hostId }, 'Property host validation successful');
-    return { valid: true };
+    return { valid: true, hostFirstName };
   } catch (error: any) {
     if (error?.name === 'AbortError') {
       logger.warn({ propertyId, hostId }, 'Property validation timed out - allowing request');
@@ -158,6 +212,7 @@ async function verifyToken(req: AuthRequest, res: Response, next: NextFunction):
       id: decoded.userId,
       firstName: decoded.firstName,
     };
+    req.token = token;
     next();
   } catch (error) {
     logger.warn({ error: error instanceof Error ? error.message : String(error) }, 'Token verification failed');
@@ -241,7 +296,10 @@ router.get('/conversations/check', verifyToken, async (req: AuthRequest, res: Re
 // POST /api/chat/conversations - Create or get existing conversation
 router.post('/conversations', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { propertyId, hostId, guestId, bookingId, hostFirstName, hostLastName, guestFirstName, guestLastName } = req.body;
+    // Participant names are never taken from the client (a "first name" could
+    // carry a phone number into the other party's inbox unmoderated): the
+    // host's comes from the property record, the guest's from server.me.
+    const { propertyId, hostId, guestId, bookingId } = req.body;
     const userId = req.user!.id;
 
     logger.debug({ propertyId, hostId, guestId, userId }, 'Creating conversation request');
@@ -259,13 +317,7 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
       res.status(400).json({ success: false, message: 'Host and guest must be different users' });
       return;
     }
-    const nameOk = (n: unknown) => n === undefined || (typeof n === 'string' && n.length <= 100);
-    if (!nameOk(hostFirstName) || !nameOk(hostLastName) || !nameOk(guestFirstName) || !nameOk(guestLastName)) {
-      res.status(400).json({ success: false, message: 'Invalid participant name' });
-      return;
-    }
-
-    // Verify the requesting user is either the host or guest
+// Verify the requesting user is either the host or guest
     if (userId !== hostId && userId !== guestId) {
       logger.warn({ userId, hostId, guestId }, 'User not authorized to create conversation');
       res.status(403).json({
@@ -292,12 +344,13 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
       return;
     }
 
+    const guestFirstName = await fetchUserFirstName(guestId, req.token);
     const conversation = await chatService.getOrCreateConversation(
       propertyId,
       hostId,
       guestId,
       bookingId,
-      { hostFirstName, hostLastName, guestFirstName, guestLastName }
+      { hostFirstName: propertyValidation.hostFirstName, guestFirstName }
     );
 
     logger.info({ conversationId: conversation.id, propertyId }, 'Conversation created/retrieved successfully');

@@ -5,9 +5,41 @@ import {
   ChatError,
   Participant,
   LastMessage,
+  MODERATION_VERSION,
+  MASK,
+  maskContactInfo,
+  isFragmentBearing,
 } from '@majestic/chat-shared';
 import { cacheGet, cacheSetEx, cacheDel } from '../lib/cache';
 import { logger } from '../lib/logger';
+
+/**
+ * What the other party may see of a participant: id, role, first name,
+ * joinedAt. `lastName` (still present on legacy documents) is never returned.
+ * Applied on every read path — Mongo and the Redis cache alike — so entries
+ * cached before the contact lock-down cannot surface it either.
+ */
+export function toPublicParticipant(p: any): Participant {
+  const out: Participant = { userId: p.userId, role: p.role, joinedAt: p.joinedAt };
+  if (typeof p.firstName === 'string' && p.firstName) out.firstName = p.firstName;
+  return out;
+}
+
+/** A legacy lastMessage preview (no MODERATION_VERSION) is masked conservatively. */
+function toPublicLastMessage(lm: any): Conversation['lastMessage'] {
+  if (!lm) return lm;
+  if (lm.version && lm.version >= MODERATION_VERSION) return lm;
+  const content = typeof lm.content === 'string' ? maskContactInfo(lm.content) : lm.content;
+  return { ...lm, content: isFragmentBearing(content || '') ? MASK : content };
+}
+
+export function toPublicConversation(conv: Conversation): Conversation {
+  return {
+    ...conv,
+    participants: (conv.participants || []).map(toPublicParticipant),
+    lastMessage: toPublicLastMessage(conv.lastMessage),
+  };
+}
 
 // Redis TTLs
 const CONV_TTL = 600;     // 10 min — individual conversation cache
@@ -87,7 +119,7 @@ export class ConversationRepository {
       // 1. Check Redis cache (optional — a miss when Redis is unavailable)
       const cached = await cacheGet(this.convKey(id));
       if (cached) {
-        return JSON.parse(cached);
+        return toPublicConversation(JSON.parse(cached));
       }
 
       // 2. Fallback to MongoDB
@@ -151,7 +183,7 @@ export class ConversationRepository {
       const cacheKey = this.convListKey(userId);
       const cached = await cacheGet(cacheKey);
       if (cached) {
-        return JSON.parse(cached);
+        return (JSON.parse(cached) as Conversation[]).map(toPublicConversation);
       }
 
       // 2. Fallback to MongoDB
@@ -185,7 +217,7 @@ export class ConversationRepository {
       const cacheKey = this.convListRoleKey(userId, role);
       const cached = await cacheGet(cacheKey);
       if (cached) {
-        return JSON.parse(cached);
+        return (JSON.parse(cached) as Conversation[]).map(toPublicConversation);
       }
 
       // 2. MongoDB query with role filter
@@ -426,7 +458,7 @@ export class ConversationRepository {
       throw new Error('Document has no id');
     }
     
-    return {
+    return toPublicConversation({
       id,
       propertyId: doc.propertyId,
       bookingId: doc.bookingId,
@@ -436,6 +468,6 @@ export class ConversationRepository {
       status: doc.status,
       createdAt: doc.createdAt,
       updatedAt: doc.updatedAt,
-    };
+    });
   }
 }
