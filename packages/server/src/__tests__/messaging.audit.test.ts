@@ -8,7 +8,7 @@ import { AddressInfo } from 'net';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { io as ioc, Socket as ClientSocket } from 'socket.io-client';
-import { ErrorCode, SOCKET_EVENTS, CHAT_CONFIG, MessageModel, checkText } from '@majestic/chat-shared';
+import { ErrorCode, SOCKET_EVENTS, CHAT_CONFIG, MessageModel, ConversationModel, checkText } from '@majestic/chat-shared';
 import { createSocketServer, TypedServer } from '../socket/server';
 import { socketAuthMiddleware } from '../middleware/socketAuth';
 import { registerMessageEvents } from '../events/messageEvents';
@@ -248,6 +248,49 @@ describe('rooms, typing and read', () => {
     guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [m1.messageId as string] });
     await waitUntil(() => acks.length === 2);
     expect((await readBy(m1.messageId as string)).filter((r) => r.userId === GUEST_ID)).toHaveLength(1);
+  });
+
+  it('a message that lands while a read receipt is in flight stays counted; the counter follows readBy truth and heals old drift', async () => {
+    const conv = await makeConversation();
+    const host = await connect(HOST_ID);
+    const guest = await connect(GUEST_ID);
+    await join(host, conv); await join(guest, conv);
+    const unreadPushes = collect<{ totalUnread: number; role: string }>(guest, SOCKET_EVENTS.UNREAD_COUNT_UPDATE);
+    const first = (await send(host, plain(conv, 'first'))) as Ack;
+    await waitUntil(() => unreadPushes.length === 1);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    // the receipt for "first" and a second message race each other
+    const second = send(host, plain(conv, 'second, racing the receipt'));
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [first.messageId as string] });
+    const secondAck = (await second) as Ack;
+    await waitUntil(() => unreadPushes.length >= 3);
+    await sleep(150);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    expect((await readBy(secondAck.messageId as string)).some((r) => r.userId === GUEST_ID)).toBe(false);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(1);
+    // legacy drift (a counter zeroed by the old unconditional reset while a message was unread) heals on the next receipt
+    await ConversationModel.updateOne({ _id: conv }, { $set: { [`unreadCount.${GUEST_ID}`]: 0 } });
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [first.messageId as string] }); // already read: nothing new to mark
+    await waitUntil(() => unreadPushes.length >= 4);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(1);
+    // reading the second one brings it to 0
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    await waitUntil(() => unreadPushes.length >= 5);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(0);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(0);
+  });
+
+  it("a conversation whose unread map has no entry for a user counts 0 for them — never the other participant's counter (legacy documents)", async () => {
+    // legacy shape: only the guest's counter exists (created by a host send before both keys were initialised at creation)
+    const legacy = await ConversationModel.create({ propertyId: 'legacy-p', participants: [{ userId: HOST_ID, role: 'host', firstName: 'Hosty', joinedAt: new Date() }, { userId: GUEST_ID, role: 'guest', firstName: 'Test', joinedAt: new Date() }], unreadCount: { [GUEST_ID]: 3 }, status: 'active' });
+    const one = await rest('/unread-count?role=host', token(HOST_ID));
+    expect(((await one.json()) as { data: { totalUnread: number } }).data.totalUnread).toBe(0);
+    const both = await rest('/unread-count?role=all', token(HOST_ID));
+    expect(((await both.json()) as { data: { host: number } }).data).toMatchObject({ host: 0 });
+    const guestSide = await rest('/unread-count?role=guest', token(GUEST_ID));
+    expect(((await guestSide.json()) as { data: { totalUnread: number } }).data.totalUnread).toBe(3);
+    await ConversationModel.deleteOne({ _id: legacy._id });
   });
 
   it('join then immediately leave ends not joined (membership follows emission order)', async () => {

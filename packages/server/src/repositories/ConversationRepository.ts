@@ -284,16 +284,37 @@ export class ConversationRepository {
    * dropped (the lists carry the per-conversation badge — leaving them cached
    * showed a stale unread badge for up to CONVLIST_TTL after reading).
    */
-  async resetUnreadCount(conversationId: string, userId: string): Promise<boolean> {
+  /**
+   * Apply a read receipt to a participant's unread counter.
+   *
+   * Resetting the counter to 0 on every read zeroed a message that had
+   * landed between the client deciding to send its receipt and the server
+   * applying it (the badge said 0 while the message was still unread), and a
+   * plain `$set` of a recomputed value has the same hole: it waits for the
+   * send transaction that is incrementing the same document and then
+   * overwrites the increment. So the counter moves by what this receipt
+   * actually marked read — a relative update composes with the send's
+   * `$inc` in either order — floored at 0, and raised to the readBy truth
+   * (`MessageRepository.countUnreadFor`, computed after the receipt) so a
+   * counter that older code had zeroed too early heals on the next receipt.
+   * Returns true when the stored value changed (only then are the caches
+   * invalidated and the role total recounted).
+   */
+  async applyReadToUnreadCount(conversationId: string, userId: string, newlyRead: number, truth: number): Promise<boolean> {
     try {
       const field = `unreadCount.${userId}`;
-      const result = await this.model.updateOne(
-        { _id: conversationId, [field]: { $gt: 0 } },
-        { $set: { [field]: 0 } }
-      );
+      const result = await this.model.updateOne({ _id: conversationId }, [
+        {
+          $set: {
+            [field]: {
+              $max: [{ $subtract: [{ $ifNull: [`$${field}`, 0] }, newlyRead] }, truth, 0],
+            },
+          },
+        },
+      ]);
       const changed = result.modifiedCount > 0;
 
-      this.logger.debug({ conversationId, userId, changed }, 'Unread count reset');
+      this.logger.debug({ conversationId, userId, newlyRead, truth, changed }, 'Unread count updated by read receipt');
 
       if (changed) {
         await this.invalidateConv(conversationId);

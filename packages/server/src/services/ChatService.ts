@@ -199,15 +199,18 @@ export class ChatService {
       }
 
       // Update readBy on messages (only for messages in this conversation)
-      if (messageIds.length > 0) {
-        await this.messageRepo.updateReadBy(conversationId, messageIds, userId, new Date());
-      }
+      const newlyRead = messageIds.length > 0
+        ? await this.messageRepo.updateReadBy(conversationId, messageIds, userId, new Date())
+        : 0;
 
-      // Reset unread count in MongoDB. Only a change invalidates the cached
-      // conversation + the reader's lists (the list carries per-conversation
-      // unread badges) and forces a recount; re-reading an already-read thread
-      // costs one cached lookup and no Redis writes.
-      const changed = await this.conversationRepo.resetUnreadCount(conversationId, userId);
+      // The counter moves by what this receipt marked read and is raised to
+      // the readBy truth — a message that arrived while the receipt was in
+      // flight stays counted (an unconditional reset to 0 used to lose it).
+      // Only a change invalidates the cached conversation + the reader's
+      // lists (the list carries per-conversation unread badges) and forces a
+      // recount; re-reading an already-read thread changes nothing.
+      const truth = await this.messageRepo.countUnreadFor(conversationId, userId);
+      const changed = await this.conversationRepo.applyReadToUnreadCount(conversationId, userId, newlyRead, truth);
       const newTotal = changed
         ? await this.unreadCountService.recalculateUnread(userId, userRole)
         : await this.unreadCountService.getTotalUnread(userId, userRole);
