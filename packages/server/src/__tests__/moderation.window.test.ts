@@ -196,13 +196,14 @@ describe('cross-message window on the live send path', () => {
     const c1 = await makeConversation(ids);
     await join(guest, c1);
     await accepted(c1, 'first five 98765', 60);
-    for (let i = 0; i < 40; i++) await accepted(c1, 'ok', 59 - i);
+    // 40 fillers of 60 characters (2400 chars) push the first half out of the 1500-character window: only the retained fragment row catches it
+    for (let i = 0; i < 40; i++) await accepted(c1, 'sure, sounds good to me, let us plan the trip together ok', 59 - i);
     expect((await send(guest, c1, 'last five 43210')).code).toBe(ErrorCode.MODERATION_BLOCKED);
     // 2. one digit per message with 6 fillers between each (63 rows before the last digit)
     const c2 = await makeConversation(ids);
     await join(guest, c2);
     let m = 200;
-    for (const d of ['9', '8', '7', '6', '5', '4', '3', '2', '1']) { await accepted(c2, d, m--); for (let i = 0; i < 6; i++) await accepted(c2, 'sure', m--); }
+    for (const d of ['9', '8', '7', '6', '5', '4', '3', '2', '1']) { await accepted(c2, d, m--); for (let i = 0; i < 6; i++) await accepted(c2, 'sure, that works for us, see you then and thanks a lot', m--); }
     expect((await send(guest, c2, '0')).code).toBe(ErrorCode.MODERATION_BLOCKED);
     // 3. a filler longer than the character window still leaves the digit run in context
     const c3 = await makeConversation(ids);
@@ -313,16 +314,17 @@ describe('moderation ↔ persistence consistency under injected faults', () => {
     const conv = await makeConversation(ids);
     const guest = await connect(ids.guestId);
     await join(guest, conv);
-    const proto = MessageRepository.prototype as any;
-    const original = proto.moderationContext;
-    proto.moderationContext = async function () {
+    // the fault is injected below the repository (the model's find), so a
+    // repository that swallowed the error and returned an empty context would fail this test
+    const originalFind = (MessageModel as any).find;
+    (MessageModel as any).find = function () {
       throw new Error('injected: Mongo unavailable');
     };
     let ack: Ack;
     try {
       ack = await send(guest, conv, 'hello there');
     } finally {
-      proto.moderationContext = original;
+      (MessageModel as any).find = originalFind;
     }
     expect(ack.success).toBe(false);
     expect(await countMessages({ conversationId: conv })).toBe(0);
