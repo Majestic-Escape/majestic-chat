@@ -1,6 +1,7 @@
 import {
   checkCandidate,
   detectContact,
+  isContextRelevant,
   MessageContent,
   ModerationResult,
   ModerationStatus,
@@ -9,6 +10,7 @@ import {
   normalizeForModeration,
 } from '@majestic/chat-shared';
 import { logger } from '../lib/logger';
+import type { ModerationContextRow } from '../repositories/MessageRepository';
 
 /**
  * Message moderation (contact lock-down, 2026-09-20).
@@ -18,16 +20,24 @@ import { logger } from '../lib/logger';
  * so a phone number, email, domain or handle split across messages is caught
  * on the completing fragment. The context is read from Mongo (the authoritative
  * history: only persisted messages count, exactly once, a rejected candidate
- * never enters it) and bounded by CONTEXT_MESSAGES / CONTEXT_CHARS /
- * CONTEXT_DAYS. The caller holds the per-(conversation, sender) lock across
- * read → judge → persist, so concurrent sends cannot slip past each other.
+ * never enters it) and bounded as follows:
+ *  - the newest messages up to CONTEXT_CHARS normalised characters (walked
+ *    newest → older, at most CONTEXT_ROWS_CAP rows, within CONTEXT_DAYS);
+ *  - plus every older message that can be a piece of an identifier
+ *    (moderation.fragment, see isContextRelevant) — up to
+ *    CONTEXT_FRAGMENT_ROWS rows / CONTEXT_FRAGMENT_CHARS characters — so a
+ *    digit sent an hour and forty filler messages ago is still in the picture.
+ * The caller holds the per-(conversation, sender) lock across read → judge →
+ * persist, so concurrent sends cannot slip past each other.
  */
-export const CONTEXT_MESSAGES = 30;
 export const CONTEXT_CHARS = 1500;
+export const CONTEXT_ROWS_CAP = 400;
+export const CONTEXT_FRAGMENT_ROWS = 200;
+export const CONTEXT_FRAGMENT_CHARS = 3000;
 export const CONTEXT_DAYS = 7;
 
 export interface ModerationContextSource {
-  recentTextsBySender(conversationId: string, senderId: string, since: Date, limit: number): Promise<string[]>;
+  moderationContext(conversationId: string, senderId: string, since: Date, caps: { rows: number; fragmentRows: number }): Promise<ModerationContextRow[]>;
 }
 
 export interface ModerationContext {
@@ -64,26 +74,39 @@ export class ModerationService {
       confidence: status === ModerationStatus.BLOCKED ? 1 : status === ModerationStatus.FLAGGED ? 0.6 : 0,
       originalContent: status !== ModerationStatus.CLEAN ? text : undefined,
       version: MODERATION_VERSION,
+      fragment: isContextRelevant(text),
     };
   }
 
   /**
-   * The sender's accepted messages, oldest first, trimmed to the character
-   * budget from the newest end (newest CONTEXT_MESSAGES within CONTEXT_DAYS).
+   * The sender's accepted messages, oldest first: the newest ones up to the
+   * character budget, plus older identifier-bearing ones (bounded), see above.
    */
   private async loadContext(context: ModerationContext): Promise<string[]> {
     const since = new Date(Date.now() - CONTEXT_DAYS * 24 * 60 * 60 * 1000);
-    const newestFirst = await context.source.recentTextsBySender(context.conversationId, context.senderId, since, CONTEXT_MESSAGES);
-    const kept: string[] = [];
+    const newestFirst = await context.source.moderationContext(context.conversationId, context.senderId, since, { rows: CONTEXT_ROWS_CAP, fragmentRows: CONTEXT_FRAGMENT_ROWS });
+    const kept: ModerationContextRow[] = [];
     let budget = CONTEXT_CHARS;
-    for (const t of newestFirst) {
-      if (!t) continue;
-      const len = normalizeForModeration(t).text.length;
-      if (len > budget) break;
-      budget -= len;
-      kept.push(t);
+    let fragmentBudget = CONTEXT_FRAGMENT_CHARS;
+    let fragmentRows = 0;
+    let windowOpen = true;
+    for (const row of newestFirst) {
+      if (!row.text) continue;
+      const len = normalizeForModeration(row.text).text.length;
+      if (windowOpen && len <= budget) {
+        budget -= len;
+        kept.push(row);
+        continue;
+      }
+      windowOpen = false; // the character window ends at the first row that does not fit
+      // older rows survive only when they can be a piece of an identifier
+      const relevant = row.fragment === undefined ? isContextRelevant(row.text) : row.fragment;
+      if (!relevant || fragmentRows >= CONTEXT_FRAGMENT_ROWS || len > fragmentBudget) continue;
+      fragmentBudget -= len;
+      fragmentRows++;
+      kept.push(row);
     }
-    return kept.reverse();
+    return kept.reverse().map((r) => r.text);
   }
 
   formatWarningMessage(result: ModerationResult): string | null {

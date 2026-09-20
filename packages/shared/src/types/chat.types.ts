@@ -79,6 +79,10 @@ export const ModerationResultSchema = z.object({
   // Detector generation that accepted the message. Rows without version 2
   // predate the contact lock-down and are masked (history-aware) on read.
   version: z.number().int().optional(),
+  // True when the text can be a piece of an identifier (isContextRelevant):
+  // such rows are kept in the sender's moderation context past the character
+  // window so filler messages cannot flush them.
+  fragment: z.boolean().optional(),
 });
 
 /** Detector generation stored on every message accepted since the contact lock-down. */

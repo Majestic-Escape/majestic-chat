@@ -12,7 +12,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { io as ioc, Socket as ClientSocket } from 'socket.io-client';
-import { ErrorCode, SOCKET_EVENTS, CHAT_CONFIG, MessageModel, ConversationModel, MODERATION_VERSION, MODERATION_BLOCKED_MESSAGE, ParticipantRole, MASK } from '@majestic/chat-shared';
+import { ErrorCode, SOCKET_EVENTS, CHAT_CONFIG, MessageModel, ConversationModel, MODERATION_VERSION, MODERATION_BLOCKED_MESSAGE, ParticipantRole, MASK, isContextRelevant } from '@majestic/chat-shared';
 import { createSocketServer, TypedServer } from '../socket/server';
 import { socketAuthMiddleware } from '../middleware/socketAuth';
 import { registerMessageEvents } from '../events/messageEvents';
@@ -183,6 +183,50 @@ describe('cross-message window on the live send path', () => {
     await join(guest, conv3);
     await MessageModel.create({ conversationId: conv3, senderId: GUEST_ID, clientMessageId: cid(), type: 'text', content: { text: '98765' }, moderation: { status: 'clean', flags: [], confidence: 0, version: MODERATION_VERSION }, readBy: [], status: 'sent', createdAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000) });
     expect((await send(guest, conv3, '43210')).success).toBe(true);
+  });
+
+  it('filler messages cannot flush a fragment out of the context: 40 fillers after a digit, 10 digits with 6 fillers between each, a 1400-char filler, an e-mail over 8 messages with fillers (rows are seeded as accepted history to stay under the rate limit)', async () => {
+    const ids = fresh();
+    const GUEST_ID = ids.guestId;
+    const guest = await connect(GUEST_ID);
+    const accepted = async (conversationId: string, text: string, minutesAgo: number) =>
+      MessageModel.create({ conversationId, senderId: GUEST_ID, clientMessageId: cid(), type: 'text', content: { text }, moderation: { status: 'clean', flags: [], confidence: 0, version: MODERATION_VERSION, fragment: isContextRelevant(text) }, readBy: [], status: 'sent', createdAt: new Date(Date.now() - minutesAgo * 60000) });
+    // 1. first half, 40 short fillers, second half
+    const c1 = await makeConversation(ids);
+    await join(guest, c1);
+    await accepted(c1, 'first five 98765', 60);
+    for (let i = 0; i < 40; i++) await accepted(c1, 'ok', 59 - i);
+    expect((await send(guest, c1, 'last five 43210')).code).toBe(ErrorCode.MODERATION_BLOCKED);
+    // 2. one digit per message with 6 fillers between each (63 rows before the last digit)
+    const c2 = await makeConversation(ids);
+    await join(guest, c2);
+    let m = 200;
+    for (const d of ['9', '8', '7', '6', '5', '4', '3', '2', '1']) { await accepted(c2, d, m--); for (let i = 0; i < 6; i++) await accepted(c2, 'sure', m--); }
+    expect((await send(guest, c2, '0')).code).toBe(ErrorCode.MODERATION_BLOCKED);
+    // 3. a filler longer than the character window still leaves the digit run in context
+    const c3 = await makeConversation(ids);
+    await join(guest, c3);
+    await accepted(c3, 'call 98765', 30);
+    await accepted(c3, 'lorem ipsum '.repeat(120), 20);
+    expect((await send(guest, c3, '43210')).code).toBe(ErrorCode.MODERATION_BLOCKED);
+    // 4. e-mail over 8 messages interleaved with fillers
+    const c4 = await makeConversation(ids);
+    await join(guest, c4);
+    m = 100;
+    for (const part of ['rahul', 'ok', 'ok', '@', 'fine', 'gmail', 'thanks', 'dot']) await accepted(c4, part, m--);
+    expect((await send(guest, c4, 'com')).code).toBe(ErrorCode.MODERATION_BLOCKED);
+    // 5. legacy rows (no fragment flag) beyond the window are judged on the fly
+    const c5 = await makeConversation(ids);
+    await join(guest, c5);
+    await MessageModel.create({ conversationId: c5, senderId: GUEST_ID, clientMessageId: cid(), type: 'text', content: { text: '98765' }, moderation: { status: 'clean', flags: [], confidence: 0 }, readBy: [], status: 'sent', createdAt: new Date(Date.now() - 50 * 60000) });
+    for (let i = 0; i < 40; i++) await accepted(c5, 'yes', 40 - i);
+    expect((await send(guest, c5, '43210')).code).toBe(ErrorCode.MODERATION_BLOCKED);
+    // 6. and ordinary chat with explained numbers stays clean across the same volume
+    const c6 = await makeConversation(ids);
+    await join(guest, c6);
+    m = 100;
+    for (const t of ['we are 2 adults and 2 kids', 'check-in at 3 pm on 12/10', 'budget is Rs 5000 per night', 'ok', 'ok', 'see you at 6']) await accepted(c6, t, m--);
+    expect((await send(guest, c6, 'is parking for 2 cars available?')).success).toBe(true);
   });
 
   it("the other party's messages are not the sender's context, and a same-id retry adds nothing", async () => {

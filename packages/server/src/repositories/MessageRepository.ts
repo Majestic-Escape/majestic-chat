@@ -40,6 +40,15 @@ function isDuplicateKey(error: unknown): boolean {
   return e?.code === 11000 || e?.cause?.code === 11000;
 }
 
+/** One row of the sender's moderation context (see moderationContext). */
+export interface ModerationContextRow {
+  id: string;
+  text: string;
+  createdAt: number;
+  /** moderation.fragment; undefined on rows written before the flag existed */
+  fragment?: boolean;
+}
+
 export class MessageRepository {
   private model = MessageModel;
   private conversationModel = ConversationModel;
@@ -281,17 +290,34 @@ export class MessageRepository {
   }
 
   /**
-   * Moderation context: the sender's persisted messages in the conversation
-   * since `since`, newest first (the caller trims to its character budget).
+   * Moderation context (contact lock-down): the sender's persisted messages
+   * in the conversation since `since`, newest first, as two bounded sets —
+   * the newest `rows` messages (the caller trims them to its character
+   * budget) and, independently, the newest `fragmentRows` messages flagged
+   * moderation.fragment (they can be pieces of an identifier and must survive
+   * any number of filler messages). Both are read through the history index
+   * `(conversationId, createdAt, _id)`; the caps bound the work.
    */
-  async recentTextsBySender(conversationId: string, senderId: string, since: Date, limit: number): Promise<string[]> {
+  async moderationContext(conversationId: string, senderId: string, since: Date, caps: { rows: number; fragmentRows: number }): Promise<ModerationContextRow[]> {
     try {
-      const rows = await this.model
-        .find({ conversationId, senderId, createdAt: { $gte: since }, deletedAt: null }, { 'content.text': 1, createdAt: 1 })
-        .sort({ createdAt: -1, _id: -1 })
-        .limit(limit)
-        .lean();
-      return rows.map((r: any) => (r.content && r.content.text) || '');
+      const base = { conversationId, senderId, createdAt: { $gte: since }, deletedAt: null };
+      const projection = { 'content.text': 1, createdAt: 1, 'moderation.fragment': 1 };
+      const [newest, fragments] = await Promise.all([
+        this.model.find(base, projection).sort({ createdAt: -1, _id: -1 }).limit(caps.rows).lean(),
+        this.model.find({ ...base, 'moderation.fragment': true }, projection).sort({ createdAt: -1, _id: -1 }).limit(caps.fragmentRows).lean(),
+      ]);
+      const toRow = (r: any): ModerationContextRow => ({ id: String(r._id), text: (r.content && r.content.text) || '', createdAt: new Date(r.createdAt).getTime(), fragment: r.moderation && typeof r.moderation.fragment === 'boolean' ? r.moderation.fragment : undefined });
+      const seen = new Set<string>();
+      const rows: ModerationContextRow[] = [];
+      for (const r of [...newest, ...fragments]) {
+        const row = toRow(r);
+        if (seen.has(row.id)) continue;
+        seen.add(row.id);
+        rows.push(row);
+      }
+      // newest first, stable on _id
+      rows.sort((a, b) => b.createdAt - a.createdAt || (b.id < a.id ? -1 : b.id > a.id ? 1 : 0));
+      return rows;
     } catch (error) {
       this.logger.error({ error, conversationId, senderId }, 'Error loading moderation context');
       throw ChatError.database('Failed to load moderation context');
