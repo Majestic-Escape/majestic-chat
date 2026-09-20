@@ -321,6 +321,39 @@ describe('lock providers', () => {
     }
   });
 
+  it("Mongo fallback: an old owner that wakes after its lease expired cannot release or renew the new owner's lock (cross-process takeover emulated on the collection)", async () => {
+    process.env.REDIS_URL = 'redis://127.0.0.1:1';
+    closeRedisClients();
+    try {
+      const key = lockKey('c11', 'u11');
+      const old = await acquireModerationLock('c11', 'u11');
+      expect(old.provider).toBe('mongo');
+      // the lease expires while the old owner is stalled (a slow transaction) and another
+      // process takes it over exactly as tryMongo does: reap the expired document, insert its own
+      await ModerationLockModel.updateOne({ _id: key }, { $set: { expiresAt: new Date(Date.now() - 1) } });
+      expect((await ModerationLockModel.deleteOne({ _id: key, expiresAt: { $lt: new Date() } })).deletedCount).toBe(1);
+      await ModerationLockModel.create({ _id: key, token: 'new-owner', expiresAt: new Date(Date.now() + 15_000) });
+      expect(await old.isOwner()).toBe(false);
+      // the stalled owner finishes: its compare-and-delete release reports the loss and leaves the new lock intact
+      expect(await old.release()).toBe(false);
+      expect(await ModerationLockModel.exists({ _id: key, token: 'new-owner' })).toBeTruthy();
+      // a renewal by the old token cannot extend the new owner's lease either
+      const before = (await ModerationLockModel.findById(key).lean()) as any;
+      await ModerationLockModel.updateOne({ _id: key, token: old.token }, { $set: { expiresAt: new Date(Date.now() + 60_000) } });
+      const after = (await ModerationLockModel.findById(key).lean()) as any;
+      expect(after.expiresAt.getTime()).toBe(before.expiresAt.getTime());
+      // the new owner (this process, next section) reaps nothing and answers BUSY while the other holds
+      await expect(acquireModerationLock('c11', 'u11')).rejects.toMatchObject({ code: ErrorCode.MODERATION_BUSY });
+      await ModerationLockModel.deleteOne({ _id: key, token: 'new-owner' });
+      // and once it is gone, the section is free again
+      const next = await acquireModerationLock('c11', 'u11');
+      expect(await next.release()).toBe(true);
+    } finally {
+      delete process.env.REDIS_URL;
+      closeRedisClients();
+    }
+  });
+
   it('a live holder in another process keeps the section exclusive; the waiter answers MODERATION_BUSY', async () => {
     process.env.REDIS_URL = 'redis://127.0.0.1:1';
     closeRedisClients();
