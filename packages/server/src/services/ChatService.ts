@@ -90,6 +90,7 @@ export class ChatService {
       // instance always sees this message and a rejected candidate never
       // becomes context (Mongo is the authoritative history).
       const lock = await acquireModerationLock(validated.conversationId, validated.senderId);
+      let persisted = false;
       let message: Message;
       let created: boolean;
       try {
@@ -149,14 +150,16 @@ export class ChatService {
             recipientIds: recipients.map(r => r.userId),
           }
         ));
-        if (!(await lock.isOwner())) {
-          // Fencing: the section outlived the lock (a stalled transaction); the
-          // message is persisted and in the context, only the exclusivity of
-          // this one section is in doubt — logged for the operator.
+        persisted = true;
+      } finally {
+        // Fencing: the compare-and-delete release reports whether the section
+        // outlived the lock (a stalled transaction). The message is persisted
+        // and in the context; only the exclusivity of this one section is in
+        // doubt — logged for the operator.
+        const stillOwned = await lock.release();
+        if (persisted && !stillOwned) {
           this.logger.warn({ conversationId: validated.conversationId, lock: lock.provider }, 'modlock_expired_in_section');
         }
-      } finally {
-        await lock.release();
       }
 
       if (!created) {

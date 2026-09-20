@@ -51,7 +51,8 @@ export interface ModerationLock {
   provider: LockProvider;
   /** True while the lock is still ours (fencing check after persistence). */
   isOwner(): Promise<boolean>;
-  release(): Promise<void>;
+  /** Releases the lock; false when it was no longer ours (expired / taken over). */
+  release(): Promise<boolean>;
 }
 
 // --- Mongo fallback model -------------------------------------------------
@@ -186,16 +187,21 @@ function makeLock(key: string, token: string, provider: LockProvider, leaveQueue
         return false;
       }
     },
-    async release() {
-      if (released) return;
+    // Resolves false when the lock was no longer ours at release time (it
+    // expired or was taken over while the section ran): the compare-and-delete
+    // answers that for free, so no separate ownership read is needed.
+    async release(): Promise<boolean> {
+      if (released) return true;
       released = true;
       if (watchdog) clearInterval(watchdog);
       try {
-        if (provider === 'redis') await getRedisClient().eval(RELEASE_SCRIPT, 1, key, token);
-        else if (provider === 'mongo') await ModerationLockModel.deleteOne({ _id: key, token });
+        if (provider === 'redis') return (await getRedisClient().eval(RELEASE_SCRIPT, 1, key, token)) === 1;
+        if (provider === 'mongo') return (await ModerationLockModel.deleteOne({ _id: key, token })).deletedCount === 1;
+        return true;
       } catch (error) {
         // The TTL is the safety net; log and move on.
         logger.warn({ key, provider, err: error instanceof Error ? error.message : String(error) }, 'modlock_release_failed');
+        return true;
       } finally {
         leaveQueue();
       }
