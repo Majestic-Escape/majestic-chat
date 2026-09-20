@@ -24,7 +24,7 @@ import {
   ModerationStatus,
 } from '@majestic/chat-shared';
 
-export const CONTACT_VECTORS_SHA256 = '08baefec1d0162ca8410333e28dff6c2641c5dac51579cd867031bfe3cfdbdc3';
+export const CONTACT_VECTORS_SHA256 = '62ea408f78a77e72db17a65981ae97808a33f7ef2065d04dc814e877d7213d7c';
 
 const fixturePath = path.resolve(__dirname, '../../../shared/src/moderation/__fixtures__/contact-vectors.json');
 // Hashed with normalised line endings so a checkout under core.autocrlf=true

@@ -632,7 +632,9 @@ export function detectContact(original: string, options: DetectOptions = {}): De
 
   runRegex(norm, URL_SCHEME_RE, PatternType.URL, hits, (m) => !isAllowedUrlHost(hostOf(m[0])));
   runRegex(norm, IPV4_RE, PatternType.URL, hits);
-  runRegex(norm, DOMAIN_RE, PatternType.URL, hits, (m) => isValidTld(m[2]) && !isAllowedUrlHost(m[0]) && !emailHits.some((e) => e.start <= norm.from[m.index] && norm.to[m.index + m[0].length - 1] <= e.end));
+  // a purely numeric host label with a bare ccTLD is a numbered list item
+  // ("12.As the candles…", "3.In case of…"), not a domain; real IPs are IPV4_RE
+  runRegex(norm, DOMAIN_RE, PatternType.URL, hits, (m) => isValidTld(m[2]) && /[a-z]/.test(m[1]) && !isAllowedUrlHost(m[0]) && !emailHits.some((e) => e.start <= norm.from[m.index] && norm.to[m.index + m[0].length - 1] <= e.end));
 
   const socialHits: ContactHit[] = [];
   runRegex(norm, SOCIAL_RE, PatternType.SOCIAL, socialHits);
@@ -748,11 +750,21 @@ interface PartsResult {
   candidateHits: PartHit[];
 }
 
+// A sentence boundary between two parts ("…peaceful environment." + "No guests")
+// is not a split identifier: gluing it would read "environment.no" (a .no
+// domain) or turn "at all." + "No" into an obfuscated e-mail. The glued pass
+// keeps a space there when the next part starts a new sentence in the
+// original text (upper-case letter); a lower-case continuation ("rahulvilla."
+// + "in") is still glued and caught.
+function sentenceBoundary(prev: string, next: string): boolean {
+  return /[.!?]\s*$/.test(prev) && /^\s*\p{Lu}/u.test(next);
+}
+
 function detectJoined(parts: string[], separator: string, options: DetectOptions, candidateIndex?: number): PartsResult {
   const offsets: number[] = [];
   let joined = '';
   parts.forEach((p, i) => {
-    if (i) joined += separator;
+    if (i) joined += separator || (sentenceBoundary(parts[i - 1], p) ? ' ' : '');
     offsets.push(joined.length);
     joined += p;
   });
