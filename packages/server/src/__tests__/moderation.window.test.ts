@@ -17,6 +17,7 @@ import { createSocketServer, TypedServer } from '../socket/server';
 import { socketAuthMiddleware } from '../middleware/socketAuth';
 import { registerMessageEvents } from '../events/messageEvents';
 import { ChatService } from '../services/ChatService';
+import { MessageRepository } from '../repositories/MessageRepository';
 import { conversationRoutes } from '../routes/conversationRoutes';
 import { acquireModerationLock, ModerationLockModel, lockKey } from '../lib/moderationLock';
 import { closeRedisClients } from '../lib/redis';
@@ -272,6 +273,83 @@ describe('cross-message window on the live send path', () => {
       expect(y.code).toBe(ErrorCode.MODERATION_BLOCKED);
     }
     expect(await countMessages({ conversationId: conv })).toBe(20);
+  });
+});
+
+describe('moderation ↔ persistence consistency under injected faults', () => {
+  it('a Mongo insert failure after a clean verdict persists nothing, leaves the context untouched, and the same-id retry then succeeds exactly once', async () => {
+    const ids = fresh();
+    const conv = await makeConversation(ids);
+    const guest = await connect(ids.guestId);
+    await join(guest, conv);
+    const proto = MessageRepository.prototype as any;
+    const original = proto.createWithConversationUpdate;
+    let failures = 0;
+    proto.createWithConversationUpdate = async function (...args: unknown[]) {
+      failures++;
+      throw new Error('injected: transaction aborted');
+    };
+    let ack: Ack;
+    const clientMessageId = cid();
+    try {
+      ack = await send(guest, conv, 'first five 98765', { clientMessageId });
+    } finally {
+      proto.createWithConversationUpdate = original;
+    }
+    expect(failures).toBe(1);
+    expect(ack.success).toBe(false);
+    expect(ack.code).not.toBe(ErrorCode.MODERATION_BLOCKED); // ambiguous failure, not a verdict
+    expect(await countMessages({ conversationId: conv })).toBe(0);
+    // the failed candidate never became context: the completing half alone is clean
+    expect((await send(guest, conv, 'last five 43210')).success).toBe(true);
+    // the client's same-id retry of the failed send is judged against the now-persisted half → blocked
+    const retry = await send(guest, conv, 'first five 98765', { clientMessageId });
+    expect(retry.code).toBe(ErrorCode.MODERATION_BLOCKED);
+    expect(await countMessages({ conversationId: conv })).toBe(1);
+  });
+
+  it('a context read failure fails CLOSED: the candidate is not accepted without its history', async () => {
+    const ids = fresh();
+    const conv = await makeConversation(ids);
+    const guest = await connect(ids.guestId);
+    await join(guest, conv);
+    const proto = MessageRepository.prototype as any;
+    const original = proto.moderationContext;
+    proto.moderationContext = async function () {
+      throw new Error('injected: Mongo unavailable');
+    };
+    let ack: Ack;
+    try {
+      ack = await send(guest, conv, 'hello there');
+    } finally {
+      proto.moderationContext = original;
+    }
+    expect(ack.success).toBe(false);
+    expect(await countMessages({ conversationId: conv })).toBe(0);
+    expect((await send(guest, conv, 'hello there')).success).toBe(true);
+  });
+
+  it('a lock that cannot be acquired (provider error) never admits the message', async () => {
+    const ids = fresh();
+    const conv = await makeConversation(ids);
+    const guest = await connect(ids.guestId);
+    await join(guest, conv);
+    const lockLib = require('../lib/moderationLock');
+    const originalCreate = ModerationLockModel.create;
+    process.env.REDIS_URL = 'redis://127.0.0.1:1';
+    closeRedisClients();
+    (ModerationLockModel as any).create = async () => { throw new Error('injected: lock store down'); };
+    let ack: Ack;
+    try {
+      ack = await send(guest, conv, 'hello');
+    } finally {
+      (ModerationLockModel as any).create = originalCreate;
+      delete process.env.REDIS_URL;
+      closeRedisClients();
+    }
+    expect(ack.success).toBe(false);
+    expect(await countMessages({ conversationId: conv })).toBe(0);
+    void lockLib;
   });
 });
 
