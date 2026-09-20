@@ -365,13 +365,19 @@ function hasDotAfter(pieces: Piece[], t: Token): boolean {
 
 export function normalizeForModeration(original: string): NormalizedText {
   const pieces = rewriteTokens(foldCharacters(original));
-  const text = new Array<string>(pieces.length);
-  const from = new Array<number>(pieces.length);
-  const to = new Array<number>(pieces.length);
-  for (let i = 0; i < pieces.length; i++) {
-    text[i] = pieces[i].s;
-    from[i] = pieces[i].from;
-    to[i] = pieces[i].to;
+  const text: string[] = [];
+  const from: number[] = [];
+  const to: number[] = [];
+  // from/to are indexed by UTF-16 code unit of the normalised text, the unit
+  // regex indexes count in: an astral piece (an emoji) is two units, so it
+  // gets two entries — otherwise every offset after it is off by one and a
+  // hit ending the text maps to `undefined` and is silently dropped.
+  for (const piece of pieces) {
+    text.push(piece.s);
+    for (let k = 0; k < piece.s.length; k++) {
+      from.push(piece.from);
+      to.push(piece.to);
+    }
   }
   return { original, text: text.join(''), from, to };
 }
