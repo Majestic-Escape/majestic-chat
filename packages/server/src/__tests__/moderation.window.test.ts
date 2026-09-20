@@ -498,6 +498,37 @@ describe('legacy history masking', () => {
     expect(second).toBeTruthy();
   });
 
+  it('legacy domain / social / UPI / swapped-order phone splits across page boundaries are masked in every page size and in the reply / preview snapshots', async () => {
+    const conv = await makeConversation();
+    const t = (m: number) => new Date(Date.parse('2026-02-01T00:00:00Z') + m * 60_000);
+    const rows: Array<[string, string]> = [
+      [GUEST_ID, 'my site is rahulvilla'], [HOST_ID, 'ok'], [GUEST_ID, 'dot in'],
+      [GUEST_ID, 'find me on insta'], [HOST_ID, 'which one?'], [GUEST_ID, 'rahul_123'],
+      [GUEST_ID, 'pay via upi'], [GUEST_ID, 'rahul'], [GUEST_ID, '@ybl'],
+      [GUEST_ID, 'rest 56789'], [HOST_ID, 'and?'], [GUEST_ID, 'part 91234'],
+      [HOST_ID, 'my number is 98765'], [GUEST_ID, 'noted'], [HOST_ID, '43210'],
+    ];
+    let m = 0;
+    for (const [sender, text] of rows) await legacyRow(conv, sender, text, t(++m));
+    const guestTok = token(GUEST_ID);
+    for (const limit of [1, 2, 3, 5, 50]) {
+      const texts: string[] = [];
+      let cursor: string | null = null;
+      for (let pages = 0; pages < 40; pages++) {
+        const p: any = await rest(`/conversations/${conv}/messages?limit=${limit}${cursor ? `&cursor=${cursor}` : ''}`, guestTok);
+        expect(p.status).toBe(200);
+        p.body.data.data.forEach((x: any) => texts.push(x.content.text));
+        cursor = p.body.data.nextCursor;
+        if (!cursor) break;
+      }
+      expect(texts.length).toBe(rows.length);
+      const all = texts.join(' | ');
+      expect(all).not.toMatch(/rahulvilla|dot in|insta|rahul_123|upi|@ybl|56789|91234|98765|43210/);
+      expect(texts).toContain('ok');
+      expect(texts).toContain('noted');
+    }
+  });
+
   it('a page of post-lock-down rows is served untouched (no masking cost path)', async () => {
     const ids = fresh();
     const conv = await makeConversation(ids);
