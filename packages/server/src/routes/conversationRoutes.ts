@@ -102,15 +102,20 @@ async function fetchUserFirstName(userId: string, token: string | undefined): Pr
 }
 
 // Validate that the hostId matches the property's actual host
-// Redis-cached: key prophost:{propertyId}, TTL: 1 hour
+// Redis-cached: key prophost2:{propertyId} (this format) + prophost:{propertyId} (legacy bare id), TTL: 1 hour
 async function validatePropertyHost(propertyId: string, hostId: string): Promise<PropertyValidationResult> {
   try {
     // 1. Check Redis cache for resolved hostId (optional cache)
-    const cacheKey = `prophost:${propertyId}`;
-    const cachedRaw = await cacheGet(cacheKey);
+    // The pre-lock-down server stores the bare host id under prophost:<id> and
+    // compares it as a string; this server needs the first name too, so it
+    // writes its object under its own key and only READS the legacy one — a
+    // rolling deploy or a rollback never leaves an instance reading a format it
+    // cannot parse (an hour of "Host ID does not match" otherwise).
+    const cacheKey = `prophost2:${propertyId}`;
+    const legacyKey = `prophost:${propertyId}`;
+    const cachedRaw = (await cacheGet(cacheKey)) || (await cacheGet(legacyKey));
 
     if (cachedRaw) {
-      // Entries written before the contact lock-down hold the bare host id.
       let cached: CachedPropertyHost;
       try {
         const parsed = JSON.parse(cachedRaw);
@@ -173,6 +178,7 @@ async function validatePropertyHost(propertyId: string, hostId: string): Promise
     // 3. Cache the resolved host (id + public first name) for 1 hour
     const entry: CachedPropertyHost = { hostId: String(propertyHostId), ...(hostFirstName ? { firstName: hostFirstName } : {}) };
     await cacheSetEx(cacheKey, 3600, JSON.stringify(entry));
+    await cacheSetEx(legacyKey, 3600, String(propertyHostId)); // keeps the pre-lock-down instances warm too
 
     if (String(propertyHostId) !== String(hostId)) {
       logger.warn({ propertyId, propertyHostId, providedHostId: hostId }, 'Host ID mismatch');

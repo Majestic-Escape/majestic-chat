@@ -129,6 +129,9 @@ const MessageSchema = new Schema<IMessageDocument>(
 MessageSchema.index({ conversationId: 1, createdAt: -1, _id: -1 }); // Message loading
 MessageSchema.index({ conversationId: 1, clientMessageId: 1 }, { unique: true }); // Idempotency
 MessageSchema.index({ senderId: 1, createdAt: -1 }); // User history
+// Moderation context (contact lock-down): the sender's rows of one conversation, newest first —
+// exact index bounds, no in-memory sort, for the two queries every send issues
+MessageSchema.index({ conversationId: 1, senderId: 1, createdAt: -1, _id: -1 });
 MessageSchema.index({ 'moderation.status': 1, createdAt: -1 }); // Moderation queue
 
 // Export model (handle serverless environments)
