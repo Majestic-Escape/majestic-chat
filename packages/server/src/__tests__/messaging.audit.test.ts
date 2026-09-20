@@ -8,12 +8,13 @@ import { AddressInfo } from 'net';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { io as ioc, Socket as ClientSocket } from 'socket.io-client';
-import { ErrorCode, SOCKET_EVENTS, CHAT_CONFIG, MessageModel, checkText } from '@majestic/chat-shared';
+import { ErrorCode, SOCKET_EVENTS, CHAT_CONFIG, MessageModel, ConversationModel, checkText } from '@majestic/chat-shared';
 import { createSocketServer, TypedServer } from '../socket/server';
 import { socketAuthMiddleware } from '../middleware/socketAuth';
 import { registerMessageEvents } from '../events/messageEvents';
 import { registerTypingEvents } from '../events/typingEvents';
 import { ChatService } from '../services/ChatService';
+import { UnreadCountService } from '../services/UnreadCountService';
 import { conversationRoutes } from '../routes/conversationRoutes';
 import { resetSessionCache } from '../lib/session';
 import { createShutdown } from '../lib/shutdown';
@@ -248,6 +249,87 @@ describe('rooms, typing and read', () => {
     guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [m1.messageId as string] });
     await waitUntil(() => acks.length === 2);
     expect((await readBy(m1.messageId as string)).filter((r) => r.userId === GUEST_ID)).toHaveLength(1);
+  });
+
+  it('a message that lands while a read receipt is in flight stays counted; the counter follows readBy truth and heals old drift', async () => {
+    const conv = await makeConversation();
+    const host = await connect(HOST_ID);
+    const guest = await connect(GUEST_ID);
+    await join(host, conv); await join(guest, conv);
+    const unreadPushes = collect<{ totalUnread: number; role: string }>(guest, SOCKET_EVENTS.UNREAD_COUNT_UPDATE);
+    const first = (await send(host, plain(conv, 'first'))) as Ack;
+    await waitUntil(() => unreadPushes.length === 1);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    // the receipt for "first" and a second message race each other
+    const second = send(host, plain(conv, 'second, racing the receipt'));
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [first.messageId as string] });
+    const secondAck = (await second) as Ack;
+    await waitUntil(() => unreadPushes.length >= 3);
+    await sleep(150);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    expect((await readBy(secondAck.messageId as string)).some((r) => r.userId === GUEST_ID)).toBe(false);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(1);
+    // a receipt is not a conversation update: lists sort by updatedAt, so the
+    // thread being read must not jump to the top of either participant's list
+    const updatedAtBefore = (await rawConversation(conv))!.updatedAt;
+    // legacy drift (a counter zeroed by the old unconditional reset while a message was unread) heals on the next receipt
+    await ConversationModel.updateOne({ _id: conv }, { $set: { [`unreadCount.${GUEST_ID}`]: 0 } }, { timestamps: false });
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [first.messageId as string] }); // already read: nothing new to mark
+    await waitUntil(() => unreadPushes.length >= 4);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(1);
+    expect((await rawConversation(conv))!.updatedAt).toEqual(updatedAtBefore);
+    // an already-applied receipt changes nothing: the counter stays, updatedAt stays, and the
+    // role total is served from the cache instead of being invalidated and recounted
+    const recounts = jest.spyOn(UnreadCountService.prototype, 'recalculateUnread');
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [first.messageId as string] });
+    await waitUntil(() => unreadPushes.length >= 5);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    expect((await rawConversation(conv))!.updatedAt).toEqual(updatedAtBefore);
+    expect(recounts).not.toHaveBeenCalled();
+    recounts.mockRestore();
+    // reading the second one brings it to 0 (still without touching updatedAt)
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    await waitUntil(() => unreadPushes.length >= 6);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(0);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(0);
+    expect((await rawConversation(conv))!.updatedAt).toEqual(updatedAtBefore);
+    // drift ABOVE the truth (a decrement that failed half-way) comes down on the next receipt,
+    // even one that marks nothing new — the badge must not show phantom unread for good
+    await ConversationModel.updateOne({ _id: conv }, { $set: { [`unreadCount.${GUEST_ID}`]: 5 } }, { timestamps: false });
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    await waitUntil(() => unreadPushes.length >= 7);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(0);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(0);
+    expect((await rawConversation(conv))!.updatedAt).toEqual(updatedAtBefore);
+    // ...and a message that lands while such a receipt is in flight is still not lost
+    await ConversationModel.updateOne({ _id: conv }, { $set: { [`unreadCount.${GUEST_ID}`]: 5 } }, { timestamps: false });
+    const third = send(host, plain(conv, 'third, racing a converging receipt'));
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    const thirdAck = (await third) as Ack;
+    await waitUntil(() => unreadPushes.length >= 9);
+    await sleep(150);
+    // the racing message is never lost: either the receipt converged (1) or the send moved the
+    // counter under it and the receipt fell back to the relative update (6, drift kept)…
+    expect([1, 6]).toContain((await rawConversation(conv))!.unreadCount[GUEST_ID]);
+    expect((await readBy(thirdAck.messageId as string)).some((r) => r.userId === GUEST_ID)).toBe(false);
+    // …and the next quiet receipt converges for good
+    guest.emit(SOCKET_EVENTS.MESSAGE_READ, { conversationId: conv, messageIds: [secondAck.messageId as string] });
+    await waitUntil(() => unreadPushes.length >= 10);
+    expect((await rawConversation(conv))!.unreadCount[GUEST_ID]).toBe(1);
+    expect(unreadPushes[unreadPushes.length - 1].totalUnread).toBe(1);
+  });
+
+  it("a conversation whose unread map has no entry for a user counts 0 for them — never the other participant's counter (legacy documents)", async () => {
+    // legacy shape: only the guest's counter exists (created by a host send before both keys were initialised at creation)
+    const legacy = await ConversationModel.create({ propertyId: 'legacy-p', participants: [{ userId: HOST_ID, role: 'host', firstName: 'Hosty', joinedAt: new Date() }, { userId: GUEST_ID, role: 'guest', firstName: 'Test', joinedAt: new Date() }], unreadCount: { [GUEST_ID]: 3 }, status: 'active' });
+    const one = await rest('/unread-count?role=host', token(HOST_ID));
+    expect(((await one.json()) as { data: { totalUnread: number } }).data.totalUnread).toBe(0);
+    const both = await rest('/unread-count?role=all', token(HOST_ID));
+    expect(((await both.json()) as { data: { host: number } }).data).toMatchObject({ host: 0 });
+    const guestSide = await rest('/unread-count?role=guest', token(GUEST_ID));
+    expect(((await guestSide.json()) as { data: { totalUnread: number } }).data.totalUnread).toBe(3);
+    await ConversationModel.deleteOne({ _id: legacy._id });
   });
 
   it('join then immediately leave ends not joined (membership follows emission order)', async () => {

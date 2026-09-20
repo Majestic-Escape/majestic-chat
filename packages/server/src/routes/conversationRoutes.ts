@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { ChatService } from '../services/ChatService';
 import { ChatError, isChatError, OBJECT_ID_RE, PaginationOptionsSchema, CHAT_CONFIG } from '@majestic/chat-shared';
-import { logger } from '../lib/logger';
+import { logger, logFailure } from '../lib/logger';
 import { cacheGet, cacheSetEx } from '../lib/cache';
 import { verifyWithMainApi } from '../lib/session';
 import { decodeToken } from '../middleware/socketAuth';
@@ -182,7 +182,7 @@ router.get('/conversations', verifyToken, async (req: AuthRequest, res: Response
     
     res.json({ success: true, data: conversations });
   } catch (error) {
-    logger.error({ error }, 'Error fetching conversations');
+    logFailure(logger, error, { userId: req.user?.id }, 'Error fetching conversations');
     if (isChatError(error)) {
       res.status(error.statusCode).json({ success: false, message: error.message });
       return;
@@ -229,7 +229,7 @@ router.get('/conversations/check', verifyToken, async (req: AuthRequest, res: Re
       } 
     });
   } catch (error) {
-    logger.error({ error }, 'Error checking conversation');
+    logFailure(logger, error, { userId: req.user?.id }, 'Error checking conversation');
     if (isChatError(error)) {
       res.status(error.statusCode).json({ success: false, message: error.message });
       return;
@@ -303,7 +303,7 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
     logger.info({ conversationId: conversation.id, propertyId }, 'Conversation created/retrieved successfully');
     res.json({ success: true, data: conversation });
   } catch (error) {
-    logger.error({ error, body: req.body }, 'Error creating conversation');
+    logFailure(logger, error, { userId: req.user?.id, body: req.body }, 'Error creating conversation');
     if (isChatError(error)) {
       res.status(error.statusCode).json({ success: false, message: error.message });
       return;
@@ -326,7 +326,7 @@ router.get('/conversations/:id', verifyToken, async (req: AuthRequest, res: Resp
 
     res.json({ success: true, data: conversation });
   } catch (error) {
-    logger.error({ error }, 'Error fetching conversation');
+    logFailure(logger, error, { userId: req.user?.id, conversationId: req.params.id }, 'Error fetching conversation');
     if (isChatError(error)) {
       res.status(error.statusCode).json({ success: false, message: error.message });
       return;
@@ -362,7 +362,7 @@ router.get('/conversations/:id/messages', verifyToken, async (req: AuthRequest, 
 
     res.json({ success: true, data: messages });
   } catch (error) {
-    logger.error({ error }, 'Error fetching messages');
+    logFailure(logger, error, { userId: req.user?.id, conversationId: req.params.id }, 'Error fetching messages');
     if (isChatError(error)) {
       res.status(error.statusCode).json({ success: false, message: error.message });
       return;
@@ -395,7 +395,7 @@ router.get('/unread-count', verifyToken, async (req: AuthRequest, res: Response)
     const totalUnread = await unreadCountService.getTotalUnread(userId, role);
     res.json({ success: true, data: { totalUnread, role } });
   } catch (error) {
-    logger.error({ error }, 'Error fetching unread count');
+    logFailure(logger, error, { userId: req.user?.id }, 'Error fetching unread count');
     if (isChatError(error)) {
       res.status(error.statusCode).json({ success: false, message: error.message });
       return;

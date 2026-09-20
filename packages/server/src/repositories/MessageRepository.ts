@@ -211,7 +211,27 @@ export class MessageRepository {
     }
   }
 
-  async updateReadBy(conversationId: string, messageIds: string[], userId: string, readAt: Date): Promise<void> {
+  /**
+   * The truth behind a participant's unread counter: messages in the
+   * conversation from other senders that carry no readBy entry for them.
+   * One indexed count on the conversation (threads are small).
+   */
+  async countUnreadFor(conversationId: string, userId: string): Promise<number> {
+    try {
+      return await this.model.countDocuments({
+        conversationId,
+        senderId: { $ne: userId },
+        'readBy.userId': { $ne: userId },
+        deletedAt: null,
+      });
+    } catch (error) {
+      this.logger.error({ error, conversationId, userId }, 'Error counting unread messages');
+      throw ChatError.database('Failed to count unread messages');
+    }
+  }
+
+  /** Returns how many messages were newly marked read (already-read ones do not count). */
+  async updateReadBy(conversationId: string, messageIds: string[], userId: string, readAt: Date): Promise<number> {
     try {
       // Only update messages that belong to the specified conversation
       // and where the user hasn't already read the message
@@ -229,6 +249,7 @@ export class MessageRepository {
       );
 
       this.logger.debug({ messageIds, userId, conversationId, matchedCount: result.matchedCount }, 'Messages marked as read');
+      return result.modifiedCount;
     } catch (error) {
       this.logger.error({ error, messageIds, userId, conversationId }, 'Error updating read receipts');
       throw ChatError.database('Failed to update read receipts');

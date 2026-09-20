@@ -167,11 +167,16 @@ export class UnreadCountService {
             }
           }
         },
-        // Project only the unread count for this user (from the Map field)
+        // Project only the unread count for this user (from the Map field).
+        // Looked up by key: a conversation whose map has no entry for this
+        // user (a legacy document — creation now writes both participants at
+        // 0) must count 0. The previous $indexOfArray/$arrayElemAt lookup
+        // returned -1 for a missing key, and $arrayElemAt with -1 is the LAST
+        // entry: the other participant's unread was added to this user's total.
         {
           $project: {
             userUnread: {
-              $ifNull: [{ $arrayElemAt: [{ $objectToArray: '$unreadCount' }, { $indexOfArray: [{ $map: { input: { $objectToArray: '$unreadCount' }, as: 'entry', in: '$$entry.k' } }, userId] }] }, { v: 0 }]
+              $ifNull: [{ $first: { $filter: { input: { $objectToArray: '$unreadCount' }, as: 'entry', cond: { $eq: ['$$entry.k', userId] } } } }, { v: 0 }]
             }
           }
         },
@@ -214,7 +219,7 @@ export class UnreadCountService {
               ]
             },
             userUnread: {
-              $ifNull: [{ $arrayElemAt: [{ $objectToArray: '$unreadCount' }, { $indexOfArray: [{ $map: { input: { $objectToArray: '$unreadCount' }, as: 'entry', in: '$$entry.k' } }, userId] }] }, { v: 0 }]
+              $ifNull: [{ $first: { $filter: { input: { $objectToArray: '$unreadCount' }, as: 'entry', cond: { $eq: ['$$entry.k', userId] } } } }, { v: 0 }]
             }
           }
         },

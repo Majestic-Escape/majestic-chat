@@ -1,6 +1,6 @@
 import { SOCKET_EVENTS, ConversationRefInputSchema, getRoomName } from '@majestic/chat-shared';
 import { TypedServer, TypedSocket } from '../socket/server';
-import { logger as baseLogger } from '../lib/logger';
+import { logger as baseLogger, logFailure } from '../lib/logger';
 import { lightLimit } from './messageEvents';
 
 /**
@@ -51,7 +51,7 @@ export function registerTypingEvents(io: TypedServer): void {
           logger.debug({ userId: user.id, conversationId: parsed.data.conversationId }, 'Typing ignored: not in room');
         }
       } catch (error) {
-        logger.error({ error, userId: user.id }, 'Error handling typing event');
+        logFailure(logger, error, { userId: user.id }, 'Typing event failed');
       }
     };
 

@@ -284,16 +284,74 @@ export class ConversationRepository {
    * dropped (the lists carry the per-conversation badge — leaving them cached
    * showed a stale unread badge for up to CONVLIST_TTL after reading).
    */
-  async resetUnreadCount(conversationId: string, userId: string): Promise<boolean> {
+  /**
+   * Apply a read receipt to a participant's unread counter.
+   *
+   * Resetting the counter to 0 on every read zeroed a message that had
+   * landed between the client deciding to send its receipt and the server
+   * applying it (the badge said 0 while the message was still unread), and a
+   * plain `$set` of a recomputed value has the same hole: it waits for the
+   * send transaction that is incrementing the same document and then
+   * overwrites the increment. So the counter moves by what this receipt
+   * actually marked read — a relative update composes with the send's
+   * `$inc` in either order — floored at 0, and raised to the readBy truth
+   * (`MessageRepository.countUnreadFor`, computed after the receipt) so a
+   * counter that older code had zeroed too early heals on the next receipt.
+   * Returns true when the stored value changed (only then are the caches
+   * invalidated and the role total recounted).
+   *
+   * A counter that sits ABOVE the truth (a decrement that failed half-way, a
+   * counted message that no longer counts) would never come down through a
+   * relative update, so when `seen` — the raw counter read just before the
+   * truth was counted — shows such drift, the counter is compared-and-set to
+   * the truth: the filter matches only if nothing moved the counter since
+   * `seen` was read, which is exactly when the truth is exact. If a
+   * concurrent send did move it, the CAS matches nothing and the relative
+   * update below runs instead, so a message that landed in the window is
+   * never lost; the drift heals on the next quiet receipt.
+   *
+   * `timestamps: false`: a read is not a conversation update. Conversation
+   * lists sort by `updatedAt`, so the automatic timestamp would move the
+   * thread being read to the top of both participants' lists, and it made
+   * every receipt count as modified (caches dropped and the total recounted
+   * for a receipt that changed nothing).
+   */
+  async applyReadToUnreadCount(conversationId: string, userId: string, newlyRead: number, truth: number, seen?: number): Promise<boolean> {
     try {
       const field = `unreadCount.${userId}`;
+      if (seen !== undefined && seen - newlyRead > truth) {
+        const cas = await this.model.updateOne(
+          { _id: conversationId, [field]: seen },
+          { $set: { [field]: truth } },
+          { timestamps: false }
+        );
+        if (cas.matchedCount > 0) {
+          const converged = cas.modifiedCount > 0;
+          this.logger.debug({ conversationId, userId, seen, newlyRead, truth, converged }, 'Unread count converged to the readBy truth');
+          if (converged) {
+            await this.invalidateConv(conversationId);
+            await this.invalidateConvList(userId);
+          }
+          return converged;
+        }
+        // the counter moved while the truth was being counted: fall through to the relative update
+      }
       const result = await this.model.updateOne(
-        { _id: conversationId, [field]: { $gt: 0 } },
-        { $set: { [field]: 0 } }
+        { _id: conversationId },
+        [
+          {
+            $set: {
+              [field]: {
+                $max: [{ $subtract: [{ $ifNull: [`$${field}`, 0] }, newlyRead] }, truth, 0],
+              },
+            },
+          },
+        ],
+        { timestamps: false }
       );
       const changed = result.modifiedCount > 0;
 
-      this.logger.debug({ conversationId, userId, changed }, 'Unread count reset');
+      this.logger.debug({ conversationId, userId, newlyRead, truth, changed }, 'Unread count updated by read receipt');
 
       if (changed) {
         await this.invalidateConv(conversationId);
@@ -303,6 +361,19 @@ export class ConversationRepository {
     } catch (error) {
       this.logger.error({ error, conversationId, userId }, 'Error resetting unread count');
       throw ChatError.database('Failed to reset unread count');
+    }
+  }
+
+  /** The stored unread counter for a participant, read from MongoDB (never the cache). */
+  async readUnreadCounter(conversationId: string, userId: string): Promise<number> {
+    try {
+      const field = `unreadCount.${userId}`;
+      const doc = await this.model.findOne({ _id: conversationId }, { [field]: 1 }).lean<{ unreadCount?: Record<string, number> }>();
+      const value = doc?.unreadCount?.[userId];
+      return typeof value === 'number' ? value : 0;
+    } catch (error) {
+      this.logger.error({ error, conversationId, userId }, 'Error reading unread counter');
+      throw ChatError.database('Failed to read unread counter');
     }
   }
 
