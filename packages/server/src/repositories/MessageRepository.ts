@@ -9,8 +9,20 @@ import {
   ConversationModel,
   IMessageDocument,
   ChatError,
+  MODERATION_VERSION,
+  maskContactInfo,
+  maskContactInfoParts,
 } from '@majestic/chat-shared';
 import { logger } from '../lib/logger';
+
+/** Rows accepted before the contact lock-down carry no detector version and are masked on read. */
+export function isLegacyModeration(doc: { moderation?: { version?: number } | null }): boolean {
+  return !doc.moderation || !doc.moderation.version || doc.moderation.version < MODERATION_VERSION;
+}
+
+// Adjacent rows loaded around a history page that contains legacy rows, so a
+// fragment split across a page boundary is masked in either direction.
+const LEGACY_CONTEXT_ROWS = 40;
 
 export type NewMessageData = Omit<Message, 'id' | 'createdAt' | 'updatedAt'>;
 
@@ -26,6 +38,15 @@ export interface CreateResult {
 function isDuplicateKey(error: unknown): boolean {
   const e = error as { code?: number; cause?: { code?: number } };
   return e?.code === 11000 || e?.cause?.code === 11000;
+}
+
+/** One row of the sender's moderation context (see moderationContext). */
+export interface ModerationContextRow {
+  id: string;
+  text: string;
+  createdAt: number;
+  /** moderation.fragment; undefined on rows written before the flag existed */
+  fragment?: boolean;
 }
 
 export class MessageRepository {
@@ -133,7 +154,7 @@ export class MessageRepository {
       const message = await this.model
         .findOne({ _id: messageId, conversationId, deletedAt: null })
         .lean();
-      return message ? this.transformDocument(message) : null;
+      return message ? this.transformDocument(this.maskIfLegacy(message)) : null;
     } catch (error) {
       this.logger.error({ error, conversationId, messageId }, 'Error finding reply target');
       throw ChatError.database('Failed to find message');
@@ -143,7 +164,7 @@ export class MessageRepository {
   async findById(id: string): Promise<Message | null> {
     try {
       const message = await this.model.findById(id).lean();
-      return message ? this.transformDocument(message) : null;
+      return message ? this.transformDocument(this.maskIfLegacy(message)) : null;
     } catch (error) {
       this.logger.error({ error, id }, 'Error finding message by ID');
       throw ChatError.database('Failed to find message');
@@ -183,7 +204,9 @@ export class MessageRepository {
         .lean();
 
       const hasMore = messages.length > limit;
-      const data = messages.slice(0, limit).map((msg) => this.transformDocument(msg));
+      const page = messages.slice(0, limit);
+      await this.maskLegacyHistory(conversationId, page);
+      const data = page.map((msg) => this.transformDocument(msg));
 
       const nextCursor = hasMore && data.length > 0 ? data[data.length - 1].id : undefined;
 
@@ -204,7 +227,7 @@ export class MessageRepository {
   ): Promise<Message | null> {
     try {
       const message = await this.model.findOne({ conversationId, clientMessageId }).lean();
-      return message ? this.transformDocument(message) : null;
+      return message ? this.transformDocument(this.maskIfLegacy(message)) : null;
     } catch (error) {
       this.logger.error({ error, conversationId, clientMessageId }, 'Error finding message');
       throw ChatError.database('Failed to find message');
@@ -266,6 +289,107 @@ export class MessageRepository {
     }
   }
 
+  /**
+   * Moderation context (contact lock-down): the sender's persisted messages
+   * in the conversation since `since`, newest first, as two bounded sets —
+   * the newest `rows` messages (the caller trims them to its character
+   * budget) and, independently, the newest `fragmentRows` messages flagged
+   * moderation.fragment (they can be pieces of an identifier and must survive
+   * any number of filler messages). Both are read through the history index
+   * `(conversationId, createdAt, _id)`; the caps bound the work.
+   */
+  async moderationContext(conversationId: string, senderId: string, since: Date, caps: { rows: number; fragmentRows: number; chars: number; fragmentChars: number }): Promise<ModerationContextRow[]> {
+    try {
+      const base = { conversationId, senderId, createdAt: { $gte: since }, deletedAt: null };
+      const projection = { 'content.text': 1, createdAt: 1, 'moderation.fragment': 1 };
+      const chars = (rows: any[]) => rows.reduce((n: number, r: any) => n + ((r.content && r.content.text) || '').length, 0);
+      // Fetch in two steps: a small batch covers the character budget for
+      // ordinary message lengths; the full cap is read only when short
+      // messages leave the budget unfilled (raw length ≥ normalised length, so
+      // the check is conservative).
+      const firstBatch = Math.min(caps.rows, 80);
+      let newest = await this.model.find(base, projection).sort({ createdAt: -1, _id: -1 }).limit(firstBatch).lean();
+      if (newest.length === firstBatch && chars(newest) < caps.chars && caps.rows > firstBatch) {
+        newest = await this.model.find(base, projection).sort({ createdAt: -1, _id: -1 }).limit(caps.rows).lean();
+      }
+      // Older identifier-bearing rows exist only beyond what the newest set
+      // covers: when every row of the window came back and fits the character
+      // budget, there is nothing older to fetch (the common, cheap case).
+      let fragments: any[] = [];
+      if (newest.length >= caps.rows || chars(newest) > caps.chars) {
+        const fragFilter = { ...base, 'moderation.fragment': true };
+        const firstFrag = Math.min(caps.fragmentRows, 60);
+        fragments = await this.model.find(fragFilter, projection).sort({ createdAt: -1, _id: -1 }).limit(firstFrag).lean();
+        if (fragments.length === firstFrag && chars(fragments) < caps.fragmentChars && caps.fragmentRows > firstFrag) {
+          fragments = await this.model.find(fragFilter, projection).sort({ createdAt: -1, _id: -1 }).limit(caps.fragmentRows).lean();
+        }
+      }
+      const toRow = (r: any): ModerationContextRow => ({ id: String(r._id), text: (r.content && r.content.text) || '', createdAt: new Date(r.createdAt).getTime(), fragment: r.moderation && typeof r.moderation.fragment === 'boolean' ? r.moderation.fragment : undefined });
+      const seen = new Set<string>();
+      const rows: ModerationContextRow[] = [];
+      for (const r of [...newest, ...fragments]) {
+        const row = toRow(r);
+        if (seen.has(row.id)) continue;
+        seen.add(row.id);
+        rows.push(row);
+      }
+      // newest first, stable on _id
+      rows.sort((a, b) => b.createdAt - a.createdAt || (b.id < a.id ? -1 : b.id > a.id ? 1 : 0));
+      return rows;
+    } catch (error) {
+      this.logger.error({ error, conversationId, senderId }, 'Error loading moderation context');
+      throw ChatError.database('Failed to load moderation context');
+    }
+  }
+
+  /**
+   * Legacy history (rows without MODERATION_VERSION) may still contain contact
+   * data, including identifiers split across messages and across page
+   * boundaries. When a page holds legacy rows, the adjacent rows on BOTH sides
+   * are loaded as context, each sender's chronological sequence is masked as
+   * one resource (separated and glued), and only the requested page is
+   * returned — count, order and cursors unchanged. Pages of post-lock-down
+   * rows cost nothing here.
+   */
+  private async maskLegacyHistory(conversationId: string, page: any[]): Promise<void> {
+    if (!page.some((m) => isLegacyModeration(m))) return;
+    const sortKey = (m: any) => `${new Date(m.createdAt).getTime().toString().padStart(15, '0')}:${String(m._id)}`;
+    const ordered = [...page].sort((a, b) => (sortKey(a) < sortKey(b) ? -1 : 1));
+    const oldest = ordered[0];
+    const newest = ordered[ordered.length - 1];
+    const [older, newer] = await Promise.all([
+      this.model
+        .find({ conversationId, $or: [{ createdAt: { $lt: oldest.createdAt } }, { createdAt: oldest.createdAt, _id: { $lt: oldest._id } }] }, { senderId: 1, 'content.text': 1, createdAt: 1 })
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(LEGACY_CONTEXT_ROWS)
+        .lean(),
+      this.model
+        .find({ conversationId, $or: [{ createdAt: { $gt: newest.createdAt } }, { createdAt: newest.createdAt, _id: { $gt: newest._id } }] }, { senderId: 1, 'content.text': 1, createdAt: 1 })
+        .sort({ createdAt: 1, _id: 1 })
+        .limit(LEGACY_CONTEXT_ROWS)
+        .lean(),
+    ]);
+    const sequence = [...(older as any[]).reverse(), ...ordered, ...(newer as any[])];
+    const bySender = new Map<string, any[]>();
+    for (const row of sequence) {
+      const list = bySender.get(row.senderId) || [];
+      list.push(row);
+      bySender.set(row.senderId, list);
+    }
+    const inPage = new Set(page.map((m) => String(m._id)));
+    for (const rows of bySender.values()) {
+      if (!rows.some((r) => inPage.has(String(r._id)) && isLegacyModeration(r))) continue;
+      const texts = rows.map((r) => (r.content && r.content.text) || '');
+      const masked = maskContactInfoParts(texts);
+      rows.forEach((r, i) => {
+        if (masked[i] !== texts[i] && inPage.has(String(r._id))) {
+          const target = page.find((m) => String(m._id) === String(r._id));
+          if (target) target.content = { ...target.content, text: masked[i] };
+        }
+      });
+    }
+  }
+
   private transformDocument(doc: any): Message {
     return {
       id: doc._id.toString(),
@@ -282,14 +406,21 @@ export class MessageRepository {
       deletedAt: doc.deletedAt,
       // Explicit pick: old documents (no key) serialise exactly as before —
       // JSON drops undefined — and nothing but the four snapshot fields leaks.
+      // A quote snapshot may carry legacy text: masked on read (bounded, ≤ REPLY_SNIPPET_MAX chars).
       replyTo: doc.replyTo?.messageId
         ? {
             messageId: doc.replyTo.messageId,
             senderId: doc.replyTo.senderId,
-            text: doc.replyTo.text ?? '',
+            text: maskContactInfo(doc.replyTo.text ?? ''),
             type: doc.replyTo.type,
           }
         : undefined,
     };
+  }
+
+  /** A legacy row served on its own (findById, reply target, idempotent replay) is masked individually. */
+  private maskIfLegacy(doc: any): any {
+    if (!doc || !isLegacyModeration(doc) || !doc.content?.text) return doc;
+    return { ...doc, content: { ...doc.content, text: maskContactInfo(doc.content.text) } };
   }
 }

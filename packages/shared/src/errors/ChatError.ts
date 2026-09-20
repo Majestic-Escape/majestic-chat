@@ -1,3 +1,9 @@
+// User-facing reasons (the site toasts the ack `error` verbatim and keeps the text in the composer).
+export const MODERATION_BLOCKED_MESSAGE =
+  "Contact details aren't allowed here. For your safety, keep communication and payments on Majestic Escape. Remove phone numbers, email addresses, social handles, links or direct-payment details and try again.";
+export const MODERATION_BUSY_MESSAGE = 'Please try again in a moment.';
+export const MODERATION_UNAVAILABLE_MESSAGE = "Messages with numbers or links can't be sent right now — please try again in a minute.";
+
 export enum ErrorCode {
   VALIDATION_ERROR = 'VALIDATION_ERROR',
   UNAUTHORIZED = 'UNAUTHORIZED',
@@ -6,6 +12,8 @@ export enum ErrorCode {
   MESSAGE_NOT_FOUND = 'MESSAGE_NOT_FOUND',
   USER_NOT_PARTICIPANT = 'USER_NOT_PARTICIPANT',
   MODERATION_BLOCKED = 'MODERATION_BLOCKED',
+  MODERATION_BUSY = 'MODERATION_BUSY',
+  MODERATION_UNAVAILABLE = 'MODERATION_UNAVAILABLE',
   RATE_LIMITED = 'RATE_LIMITED',
   DATABASE_ERROR = 'DATABASE_ERROR',
   SOCKET_ERROR = 'SOCKET_ERROR',
@@ -22,6 +30,8 @@ export const HTTP_STATUS_MAP: Record<ErrorCode, number> = {
   [ErrorCode.MESSAGE_NOT_FOUND]: 404,
   [ErrorCode.USER_NOT_PARTICIPANT]: 403,
   [ErrorCode.MODERATION_BLOCKED]: 403,
+  [ErrorCode.MODERATION_BUSY]: 429,
+  [ErrorCode.MODERATION_UNAVAILABLE]: 503,
   [ErrorCode.RATE_LIMITED]: 429,
   [ErrorCode.DATABASE_ERROR]: 500,
   [ErrorCode.SOCKET_ERROR]: 500,
@@ -72,7 +82,9 @@ export class ChatError extends Error {
       [ErrorCode.CONVERSATION_NOT_FOUND]: 'Conversation not found',
       [ErrorCode.MESSAGE_NOT_FOUND]: 'Message not found',
       [ErrorCode.USER_NOT_PARTICIPANT]: 'User is not a participant in this conversation',
-      [ErrorCode.MODERATION_BLOCKED]: 'Message blocked by moderation',
+      [ErrorCode.MODERATION_BLOCKED]: MODERATION_BLOCKED_MESSAGE,
+      [ErrorCode.MODERATION_BUSY]: MODERATION_BUSY_MESSAGE,
+      [ErrorCode.MODERATION_UNAVAILABLE]: MODERATION_UNAVAILABLE_MESSAGE,
       [ErrorCode.RATE_LIMITED]: 'Rate limit exceeded',
       [ErrorCode.DATABASE_ERROR]: 'Database operation failed',
       [ErrorCode.SOCKET_ERROR]: 'Socket connection error',
@@ -111,8 +123,18 @@ export class ChatError extends Error {
     );
   }
 
-  static moderationBlocked(flags: string[]): ChatError {
-    return new ChatError(ErrorCode.MODERATION_BLOCKED, 'Message blocked by moderation', { flags });
+  static moderationBlocked(flags: string[], message: string = MODERATION_BLOCKED_MESSAGE): ChatError {
+    return new ChatError(ErrorCode.MODERATION_BLOCKED, message, { flags });
+  }
+
+  /** The sender's moderation critical section is held by a concurrent send; retry with the same clientMessageId. */
+  static moderationBusy(): ChatError {
+    return new ChatError(ErrorCode.MODERATION_BUSY, MODERATION_BUSY_MESSAGE, { retryAfter: 2 });
+  }
+
+  /** Shared moderation state is unreachable: a message that could be a contact fragment is refused until it is back. */
+  static moderationUnavailable(): ChatError {
+    return new ChatError(ErrorCode.MODERATION_UNAVAILABLE, MODERATION_UNAVAILABLE_MESSAGE, { retryAfter: 60 });
   }
 
   static rateLimited(retryAfter?: number): ChatError {

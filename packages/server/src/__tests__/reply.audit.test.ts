@@ -168,7 +168,7 @@ describe('hostile payloads', () => {
     const guest = await connect(GUEST_ID);
     await join(host, conv);
     const got = collect(host);
-    const evil = '<img src=x onerror=alert(1)>‮\ud800 lone   nul 日本語 😀 ' + 'https://x.test/' + 'a'.repeat(300);
+    const evil = '<img src=x onerror=alert(1)>‮\ud800 lone   nul 日本語 😀 ' + 'a'.repeat(300); // (no URL: links are blocked by the contact policy, see moderation.corpus.test.ts)
     const res = (await send(guest, plain(conv, evil))) as Ack;
     expect(res.success).toBe(true);
     await waitUntil(() => got.length === 1);

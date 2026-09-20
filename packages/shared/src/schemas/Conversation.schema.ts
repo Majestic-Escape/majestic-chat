@@ -33,6 +33,7 @@ const ConversationSchema = new Schema<IConversationDocument>(
       content: { type: String },
       senderId: { type: String },
       sentAt: { type: Date },
+      version: { type: Number },
     },
     unreadCount: {
       type: Map,

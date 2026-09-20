@@ -9,6 +9,7 @@ import {
   ChatError,
   MessageStatus,
   ModerationStatus,
+  MODERATION_VERSION,
   ParticipantRole,
   ConversationStatus,
   ReplyRef,
@@ -17,6 +18,7 @@ import {
 import { MessageRepository } from '../repositories/MessageRepository';
 import { ConversationRepository } from '../repositories/ConversationRepository';
 import { ModerationService } from './ModerationService';
+import { acquireModerationLock } from '../lib/moderationLock';
 import { UnreadCountService } from './UnreadCountService';
 import { logger, logFailure } from '../lib/logger';
 
@@ -82,57 +84,83 @@ export class ChatService {
         .filter(p => p.userId !== validated.senderId)
         .map(p => ({ userId: p.userId, role: p.role as string }));
 
-      // Check for duplicate (idempotency) — cheap fast path; the unique index
-      // inside createWithConversationUpdate is the real guarantee.
-      const existing = await this.messageRepo.findByClientMessageId(
-        validated.conversationId,
-        validated.clientMessageId
-      );
-      if (existing) {
-        this.logger.debug({ messageId: existing.id }, 'Returning existing message (idempotent)');
-        return { message: existing, recipientInfo: recipients, created: false };
-      }
-
-      // Resolve the quoted message before any write (structural check, 404)
-      const replyTo = validated.replyTo
-        ? await this.resolveReplyTo(validated.conversationId, validated.replyTo.messageId)
-        : undefined;
-
-      // Run moderation check
-      const moderationResult = await this.moderationService.checkMessage(validated.content);
-
-      // Block if moderation failed
-      if (moderationResult.status === ModerationStatus.BLOCKED) {
-        this.logger.warn(
-          { conversationId: validated.conversationId, flags: moderationResult.flags },
-          'Message blocked by moderation'
+      // Contact lock-down: read the sender's accepted context, judge the
+      // candidate and persist it inside one per-(conversation, sender)
+      // critical section, so a concurrent send from another socket or
+      // instance always sees this message and a rejected candidate never
+      // becomes context (Mongo is the authoritative history).
+      const lock = await acquireModerationLock(validated.conversationId, validated.senderId);
+      let persisted = false;
+      let message: Message;
+      let created: boolean;
+      try {
+        // Check for duplicate (idempotency) — cheap fast path; the unique index
+        // inside createWithConversationUpdate is the real guarantee.
+        const existing = await this.messageRepo.findByClientMessageId(
+          validated.conversationId,
+          validated.clientMessageId
         );
-        throw ChatError.moderationBlocked(moderationResult.flags);
-      }
+        if (existing) {
+          this.logger.debug({ messageId: existing.id }, 'Returning existing message (idempotent)');
+          return { message: existing, recipientInfo: recipients, created: false };
+        }
 
-      // Insert the message and update the conversation (lastMessage + unread)
-      // in one transaction — both or neither, whatever crashes afterwards.
-      // A plain message carries no replyTo key at all.
-      const { message, created } = await this.messageRepo.createWithConversationUpdate(
-        {
+        // Resolve the quoted message before any write (structural check, 404)
+        const replyTo = validated.replyTo
+          ? await this.resolveReplyTo(validated.conversationId, validated.replyTo.messageId)
+          : undefined;
+
+        // Moderation against the sender's accepted history (cross-message, cross-instance)
+        const moderationResult = await this.moderationService.checkMessage(validated.content, {
           conversationId: validated.conversationId,
           senderId: validated.senderId,
-          clientMessageId: validated.clientMessageId,
-          type: validated.type,
-          content: validated.content,
-          moderation: moderationResult,
-          readBy: [{ userId: validated.senderId, readAt: new Date() }],
-          status: MessageStatus.SENT,
-          ...(replyTo ? { replyTo } : {}),
-        },
-        {
-          lastMessage: {
-            content: validated.content.text || '[Attachment]',
-            senderId: validated.senderId,
-          },
-          recipientIds: recipients.map(r => r.userId),
+          source: this.messageRepo,
+        });
+
+        // Block if moderation failed — nothing is written, nothing enters the context
+        if (moderationResult.status === ModerationStatus.BLOCKED) {
+          this.logger.warn(
+            { conversationId: validated.conversationId, flags: moderationResult.flags },
+            'Message blocked by moderation'
+          );
+          throw ChatError.moderationBlocked(moderationResult.flags);
         }
-      );
+
+        // Insert the message and update the conversation (lastMessage + unread)
+        // in one transaction — both or neither, whatever crashes afterwards.
+        // A plain message carries no replyTo key at all.
+        ({ message, created } = await this.messageRepo.createWithConversationUpdate(
+          {
+            conversationId: validated.conversationId,
+            senderId: validated.senderId,
+            clientMessageId: validated.clientMessageId,
+            type: validated.type,
+            content: validated.content,
+            moderation: moderationResult,
+            readBy: [{ userId: validated.senderId, readAt: new Date() }],
+            status: MessageStatus.SENT,
+            ...(replyTo ? { replyTo } : {}),
+          },
+          {
+            lastMessage: {
+              content: validated.content.text || '[Attachment]',
+              senderId: validated.senderId,
+              version: MODERATION_VERSION,
+            },
+            recipientIds: recipients.map(r => r.userId),
+          }
+        ));
+        persisted = true;
+      } finally {
+        // Fencing: the compare-and-delete release reports whether the section
+        // outlived the lock (a stalled transaction). The message is persisted
+        // and in the context; only the exclusivity of this one section is in
+        // doubt — logged for the operator.
+        const stillOwned = await lock.release();
+        if (persisted && !stillOwned) {
+          this.logger.warn({ conversationId: validated.conversationId, lock: lock.provider }, 'modlock_expired_in_section');
+        }
+      }
 
       if (!created) {
         // Lost the race to a concurrent identical send: same outcome as the
@@ -261,7 +289,7 @@ export class ChatService {
     hostId: string,
     guestId: string,
     bookingId?: string,
-    participantNames?: { hostFirstName?: string; hostLastName?: string; guestFirstName?: string; guestLastName?: string }
+    participantNames?: { hostFirstName?: string; guestFirstName?: string }
   ): Promise<Conversation> {
     try {
       // Try to find existing conversation for this specific property and participants
@@ -277,19 +305,17 @@ export class ChatService {
         propertyId,
         bookingId,
         participants: [
-          { 
-            userId: hostId, 
-            role: ParticipantRole.HOST, 
-            firstName: participantNames?.hostFirstName,
-            lastName: participantNames?.hostLastName,
-            joinedAt: new Date() 
+          {
+            userId: hostId,
+            role: ParticipantRole.HOST,
+            ...(participantNames?.hostFirstName ? { firstName: participantNames.hostFirstName } : {}),
+            joinedAt: new Date()
           },
-          { 
-            userId: guestId, 
-            role: ParticipantRole.GUEST, 
-            firstName: participantNames?.guestFirstName,
-            lastName: participantNames?.guestLastName,
-            joinedAt: new Date() 
+          {
+            userId: guestId,
+            role: ParticipantRole.GUEST,
+            ...(participantNames?.guestFirstName ? { firstName: participantNames.guestFirstName } : {}),
+            joinedAt: new Date()
           },
         ],
         unreadCount: { [hostId]: 0, [guestId]: 0 },
