@@ -37,7 +37,7 @@ export const CONTEXT_FRAGMENT_CHARS = 3000;
 export const CONTEXT_DAYS = 7;
 
 export interface ModerationContextSource {
-  moderationContext(conversationId: string, senderId: string, since: Date, caps: { rows: number; fragmentRows: number }): Promise<ModerationContextRow[]>;
+  moderationContext(conversationId: string, senderId: string, since: Date, caps: { rows: number; fragmentRows: number; chars: number; fragmentChars: number }): Promise<ModerationContextRow[]>;
 }
 
 export interface ModerationContext {
@@ -84,7 +84,7 @@ export class ModerationService {
    */
   private async loadContext(context: ModerationContext): Promise<string[]> {
     const since = new Date(Date.now() - CONTEXT_DAYS * 24 * 60 * 60 * 1000);
-    const newestFirst = await context.source.moderationContext(context.conversationId, context.senderId, since, { rows: CONTEXT_ROWS_CAP, fragmentRows: CONTEXT_FRAGMENT_ROWS });
+    const newestFirst = await context.source.moderationContext(context.conversationId, context.senderId, since, { rows: CONTEXT_ROWS_CAP, fragmentRows: CONTEXT_FRAGMENT_ROWS, chars: CONTEXT_CHARS, fragmentChars: CONTEXT_FRAGMENT_CHARS });
     const kept: ModerationContextRow[] = [];
     let budget = CONTEXT_CHARS;
     let fragmentBudget = CONTEXT_FRAGMENT_CHARS;

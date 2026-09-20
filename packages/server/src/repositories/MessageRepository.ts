@@ -298,14 +298,32 @@ export class MessageRepository {
    * any number of filler messages). Both are read through the history index
    * `(conversationId, createdAt, _id)`; the caps bound the work.
    */
-  async moderationContext(conversationId: string, senderId: string, since: Date, caps: { rows: number; fragmentRows: number }): Promise<ModerationContextRow[]> {
+  async moderationContext(conversationId: string, senderId: string, since: Date, caps: { rows: number; fragmentRows: number; chars: number; fragmentChars: number }): Promise<ModerationContextRow[]> {
     try {
       const base = { conversationId, senderId, createdAt: { $gte: since }, deletedAt: null };
       const projection = { 'content.text': 1, createdAt: 1, 'moderation.fragment': 1 };
-      const [newest, fragments] = await Promise.all([
-        this.model.find(base, projection).sort({ createdAt: -1, _id: -1 }).limit(caps.rows).lean(),
-        this.model.find({ ...base, 'moderation.fragment': true }, projection).sort({ createdAt: -1, _id: -1 }).limit(caps.fragmentRows).lean(),
-      ]);
+      const chars = (rows: any[]) => rows.reduce((n: number, r: any) => n + ((r.content && r.content.text) || '').length, 0);
+      // Fetch in two steps: a small batch covers the character budget for
+      // ordinary message lengths; the full cap is read only when short
+      // messages leave the budget unfilled (raw length ≥ normalised length, so
+      // the check is conservative).
+      const firstBatch = Math.min(caps.rows, 80);
+      let newest = await this.model.find(base, projection).sort({ createdAt: -1, _id: -1 }).limit(firstBatch).lean();
+      if (newest.length === firstBatch && chars(newest) < caps.chars && caps.rows > firstBatch) {
+        newest = await this.model.find(base, projection).sort({ createdAt: -1, _id: -1 }).limit(caps.rows).lean();
+      }
+      // Older identifier-bearing rows exist only beyond what the newest set
+      // covers: when every row of the window came back and fits the character
+      // budget, there is nothing older to fetch (the common, cheap case).
+      let fragments: any[] = [];
+      if (newest.length >= caps.rows || chars(newest) > caps.chars) {
+        const fragFilter = { ...base, 'moderation.fragment': true };
+        const firstFrag = Math.min(caps.fragmentRows, 60);
+        fragments = await this.model.find(fragFilter, projection).sort({ createdAt: -1, _id: -1 }).limit(firstFrag).lean();
+        if (fragments.length === firstFrag && chars(fragments) < caps.fragmentChars && caps.fragmentRows > firstFrag) {
+          fragments = await this.model.find(fragFilter, projection).sort({ createdAt: -1, _id: -1 }).limit(caps.fragmentRows).lean();
+        }
+      }
       const toRow = (r: any): ModerationContextRow => ({ id: String(r._id), text: (r.content && r.content.text) || '', createdAt: new Date(r.createdAt).getTime(), fragment: r.moderation && typeof r.moderation.fragment === 'boolean' ? r.moderation.fragment : undefined });
       const seen = new Set<string>();
       const rows: ModerationContextRow[] = [];
