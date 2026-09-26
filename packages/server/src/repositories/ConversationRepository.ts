@@ -128,8 +128,9 @@ export class ConversationRepository {
 
       const result = this.transformDocument(conversation);
 
-      // 3. Cache for next time
-      await cacheSetEx(this.convKey(id), CONV_TTL, JSON.stringify(result));
+      // 3. Cache for next time — off the response's critical path (the helper
+      // swallows failures and heals skipped writes itself)
+      void cacheSetEx(this.convKey(id), CONV_TTL, JSON.stringify(result));
 
       return result;
     } catch (error) {
@@ -195,8 +196,8 @@ export class ConversationRepository {
 
       const result = conversations.map((conv) => this.transformDocument(conv));
 
-      // 3. Cache for next time
-      await cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));
+      // 3. Cache for next time — off the response's critical path
+      void cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));
 
       return result;
     } catch (error) {
@@ -231,8 +232,8 @@ export class ConversationRepository {
 
       const result = conversations.map((conv) => this.transformDocument(conv));
 
-      // 3. Cache for next time
-      await cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));
+      // 3. Cache for next time — off the response's critical path
+      void cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));
 
       return result;
     } catch (error) {

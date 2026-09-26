@@ -11,6 +11,7 @@ import { conversationRoutes } from './routes/conversationRoutes';
 import { getRedisClient } from './lib/redis';
 import { createShutdown } from './lib/shutdown';
 import { logger } from './lib/logger';
+import { buildCorsOptions } from './lib/corsOptions';
 
 const PORT = process.env.PORT || 3001;
 
@@ -77,10 +78,7 @@ async function startServer() {
     
     // Middleware - secure CORS configuration
     const corsOrigins = getCorsOrigins();
-    app.use(cors({
-      origin: corsOrigins,
-      credentials: true,
-    }));
+    app.use(cors(buildCorsOptions(corsOrigins)));
     logger.info({ origins: corsOrigins }, 'CORS configured');
     app.use(express.json());
 
