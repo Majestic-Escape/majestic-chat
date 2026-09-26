@@ -28,6 +28,10 @@ const REQUEST_TIMEOUT_MS = 3000;
 const MAX_LOCAL = 5000;
 
 const local = new Map<string, { verdict: SessionVerdict; expiresAt: number }>();
+// One main-API call per token at a time: opening the inbox fires the unread
+// count, the conversation list and the socket handshake together, and each
+// used to ask server.me on its own once the cached verdict had expired.
+const inFlight = new Map<string, Promise<SessionVerdict>>();
 
 function keyFor(token: string): string {
   return 'session:' + createHash('sha256').update(token).digest('hex');
@@ -48,6 +52,16 @@ export async function verifyWithMainApi(token: string): Promise<SessionVerdict> 
   if (cached && cached.expiresAt > Date.now()) return cached.verdict;
   if (cached) local.delete(key);
 
+  const pending = inFlight.get(key);
+  if (pending) return pending;
+  const check = lookup(key, token, apiBaseUrl).finally(() => {
+    if (inFlight.get(key) === check) inFlight.delete(key);
+  });
+  inFlight.set(key, check);
+  return check;
+}
+
+async function lookup(key: string, token: string, apiBaseUrl: string): Promise<SessionVerdict> {
   const shared = await cacheGet(key);
   if (shared === 'ok' || shared === 'rejected') {
     local.set(key, { verdict: shared, expiresAt: Date.now() + VERDICT_TTL_S * 1000 });
@@ -87,4 +101,5 @@ export async function verifyWithMainApi(token: string): Promise<SessionVerdict> 
 /** Test hook: forget every cached verdict. */
 export function resetSessionCache(): void {
   local.clear();
+  inFlight.clear();
 }

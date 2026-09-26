@@ -24,6 +24,19 @@ export function isLegacyModeration(doc: { moderation?: { version?: number } | nu
 // fragment split across a page boundary is masked in either direction.
 const LEGACY_CONTEXT_ROWS = 40;
 
+/**
+ * The moderation block as it may leave the server. Pre-lock-down rows (and the
+ * detector's result for a flagged message) kept `originalContent`: the text as
+ * typed, before any masking — a phone number or email the legacy masking hides
+ * in `content.text` would have gone out verbatim here. No client reads this
+ * block; it is kept minus the raw text so the wire shape stays compatible.
+ */
+export function publicModeration(m: unknown): unknown {
+  if (!m || typeof m !== 'object') return m;
+  const { originalContent: _raw, ...rest } = m as Record<string, unknown>;
+  return rest;
+}
+
 export type NewMessageData = Omit<Message, 'id' | 'createdAt' | 'updatedAt'>;
 
 /** Result of an idempotent create: `created` is false when the
@@ -398,7 +411,7 @@ export class MessageRepository {
       clientMessageId: doc.clientMessageId,
       type: doc.type,
       content: doc.content,
-      moderation: doc.moderation,
+      moderation: publicModeration(doc.moderation) as Message['moderation'],
       readBy: doc.readBy || [],
       status: doc.status,
       createdAt: doc.createdAt,

@@ -5,8 +5,10 @@ import { logger, logFailure } from '../lib/logger';
 import { cacheGet, cacheSetEx } from '../lib/cache';
 import { verifyWithMainApi } from '../lib/session';
 import { decodeToken } from '../middleware/socketAuth';
+import { gzipJson } from '../lib/gzipJson';
 
 const router = Router();
+router.use(gzipJson);
 const chatService = new ChatService();
 
 const isObjectId = (v: unknown): v is string => typeof v === 'string' && OBJECT_ID_RE.test(v);
