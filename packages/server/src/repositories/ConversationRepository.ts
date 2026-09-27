@@ -12,6 +12,7 @@ import {
 } from '@majestic/chat-shared';
 import { cacheGet, cacheSetEx, cacheDel } from '../lib/cache';
 import { logger } from '../lib/logger';
+import { withLiveFirstNames } from '../lib/liveNames';
 
 /**
  * What the other party may see of a participant: id, role, first name,
@@ -194,7 +195,9 @@ export class ConversationRepository {
         .limit(limit)
         .lean();
 
-      const result = conversations.map((conv) => this.transformDocument(conv));
+      // Live first names from the main DB (one `users` find per cache miss;
+      // the cached list carries them for CONVLIST_TTL, cache hits cost nothing)
+      const result = await withLiveFirstNames(conversations.map((conv) => this.transformDocument(conv)));
 
       // 3. Cache for next time — off the response's critical path
       void cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));
@@ -230,7 +233,9 @@ export class ConversationRepository {
         .limit(limit)
         .lean();
 
-      const result = conversations.map((conv) => this.transformDocument(conv));
+      // Live first names from the main DB (one `users` find per cache miss;
+      // the cached list carries them for CONVLIST_TTL, cache hits cost nothing)
+      const result = await withLiveFirstNames(conversations.map((conv) => this.transformDocument(conv)));
 
       // 3. Cache for next time — off the response's critical path
       void cacheSetEx(cacheKey, CONVLIST_TTL, JSON.stringify(result));

@@ -9,10 +9,10 @@ import { ConversationModel, MessageModel, ParticipantRole } from '@majestic/chat
  */
 let replSet: MongoMemoryReplSet | null = null;
 
-export async function startDb(): Promise<string> {
+export async function startDb(connectOptions: mongoose.ConnectOptions = {}): Promise<string> {
   replSet = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } });
   const uri = replSet.getUri('majestic-chat-test');
-  await mongoose.connect(uri);
+  await mongoose.connect(uri, connectOptions);
   await MessageModel.syncIndexes();
   await ConversationModel.syncIndexes();
   return uri;

@@ -1,11 +1,13 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { ChatService } from '../services/ChatService';
-import { ChatError, isChatError, OBJECT_ID_RE, PaginationOptionsSchema, CHAT_CONFIG, isAcceptableName } from '@majestic/chat-shared';
+import { ChatError, isChatError, OBJECT_ID_RE, PaginationOptionsSchema, CHAT_CONFIG } from '@majestic/chat-shared';
 import { logger, logFailure } from '../lib/logger';
 import { cacheGet, cacheSetEx } from '../lib/cache';
 import { verifyWithMainApi } from '../lib/session';
 import { decodeToken } from '../middleware/socketAuth';
 import { gzipJson } from '../lib/gzipJson';
+import { acceptableFirstName, withLiveFirstNames } from '../lib/liveNames';
+import { toPublicConversation } from '../repositories/ConversationRepository';
 
 const router = Router();
 router.use(gzipJson);
@@ -70,10 +72,6 @@ interface PropertyApiResponse {
 interface CachedPropertyHost {
   hostId: string;
   firstName?: string;
-}
-
-function acceptableFirstName(name: unknown): string | undefined {
-  return isAcceptableName(name) ? (name as string).trim() : undefined;
 }
 
 /**
@@ -362,7 +360,10 @@ router.post('/conversations', verifyToken, async (req: AuthRequest, res: Respons
     );
 
     logger.info({ conversationId: conversation.id, propertyId }, 'Conversation created/retrieved successfully');
-    res.json({ success: true, data: conversation });
+    // Both branches: the public shape (a fresh document is raw toJSON — _id/id
+    // on each participant) with live first names from the main DB.
+    const [publicConversation] = await withLiveFirstNames([toPublicConversation(conversation)]);
+    res.json({ success: true, data: publicConversation });
   } catch (error) {
     logFailure(logger, error, { userId: req.user?.id, body: req.body }, 'Error creating conversation');
     if (isChatError(error)) {
@@ -383,9 +384,12 @@ router.get('/conversations/:id', verifyToken, async (req: AuthRequest, res: Resp
       return;
     }
 
+    // getConversation is the (cached, query-free) permission check shared with
+    // send / history / join; only this response pays the live-name lookup.
     const conversation = await chatService.getConversation(conversationId, userId);
+    const [withNames] = await withLiveFirstNames([conversation]);
 
-    res.json({ success: true, data: conversation });
+    res.json({ success: true, data: withNames });
   } catch (error) {
     logFailure(logger, error, { userId: req.user?.id, conversationId: req.params.id }, 'Error fetching conversation');
     if (isChatError(error)) {
