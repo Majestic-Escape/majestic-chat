@@ -10,6 +10,8 @@ import {
 } from '@majestic/chat-shared';
 import { getPubSubClients } from '../lib/redis';
 import { verifyWithMainApi } from '../lib/session';
+import { expireMessagingToggle, isMessagingEnabled } from '../lib/messagingToggle';
+import { messagingPacketGate } from '../middleware/messagingGate';
 import { logger } from '../lib/logger';
 import jwt from 'jsonwebtoken';
 
@@ -84,6 +86,20 @@ export function createSocketServer(httpServer: HttpServer): TypedServer {
     logger.error({ error }, 'Failed to setup Redis adapter, running in single-server mode');
   }
 
+  // Drop every socket once an admin switches messaging off. While anyone is
+  // connected this re-reads the flag every 5 s (the read also refreshes the cache
+  // REST and handshakes use, so a flip lands within ~5 s); an idle instance reads
+  // nothing and keeps the 10 s cache. `local`: each instance sweeps its own sockets.
+  setInterval(() => {
+    if (io.engine.clientsCount === 0) return;
+    expireMessagingToggle();
+    void isMessagingEnabled().then((enabled) => {
+      if (enabled) return;
+      io.local.emit('messaging:disabled');
+      io.local.disconnectSockets(true);
+    });
+  }, 5_000).unref();
+
   // Track connection metrics
   let connectionCount = 0;
 
@@ -100,6 +116,10 @@ export function createSocketServer(httpServer: HttpServer): TypedServer {
     };
     
     logger.info(clientInfo, 'Client connected');
+
+    // Every packet from this socket is checked against the messaging switch
+    // (synchronously; see messagingPacketGate).
+    socket.use((packet, next) => messagingPacketGate(socket, packet, next));
 
     // Auto-join user to personal room for global notifications (e.g., unread count updates)
     if (socket.data.user?.id) {
