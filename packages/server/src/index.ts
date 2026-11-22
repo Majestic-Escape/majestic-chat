@@ -4,6 +4,7 @@ import cors from 'cors';
 import { connectDatabase } from './lib/database';
 import { createSocketServer } from './socket/server';
 import { socketAuthMiddleware } from './middleware/socketAuth';
+import { messagingSocketGate } from './middleware/messagingGate';
 import { registerMessageEvents } from './events/messageEvents';
 import { registerTypingEvents } from './events/typingEvents';
 import { ChatService } from './services/ChatService';
@@ -96,7 +97,9 @@ async function startServer() {
     // Create Socket.io server
     const io = createSocketServer(httpServer);
 
-    // Apply authentication middleware
+    // Admin "Messaging" switch first (refuses the handshake while it is off),
+    // then authentication.
+    io.use(messagingSocketGate);
     io.use(socketAuthMiddleware);
 
     // Initialize services

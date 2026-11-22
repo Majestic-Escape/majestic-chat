@@ -88,6 +88,9 @@ export interface ServerToClientEvents {
   // total, so a client can refresh/join a conversation it has not seen yet.
   "unread:update": (data: { userId: string; totalUnread: number; role: string; conversationId?: string }) => void;
   error: (data: { code: string; message: string }) => void;
+  // Sent just before the server drops a socket because an admin switched
+  // messaging off; clients must hide messaging and not reconnect.
+  "messaging:disabled": () => void;
 }
 
 export interface InterServerEvents {

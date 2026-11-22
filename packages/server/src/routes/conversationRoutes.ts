@@ -6,10 +6,13 @@ import { cacheGet, cacheSetEx } from '../lib/cache';
 import { verifyWithMainApi } from '../lib/session';
 import { decodeToken } from '../middleware/socketAuth';
 import { gzipJson } from '../lib/gzipJson';
+import { messagingGate } from '../middleware/messagingGate';
 import { acceptableFirstName, withLiveFirstNames } from '../lib/liveNames';
 import { toPublicConversation } from '../repositories/ConversationRepository';
 
 const router = Router();
+// First, before auth: when an admin switches messaging off nothing here answers.
+router.use(messagingGate);
 router.use(gzipJson);
 const chatService = new ChatService();
 
